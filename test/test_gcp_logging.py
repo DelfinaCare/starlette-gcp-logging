@@ -261,7 +261,7 @@ class TestGCPRequestLoggingMiddleware(unittest.TestCase):
 
 
 class TestIAPHeaderParsing(unittest.TestCase):
-    def _make_request(self, headers: dict) -> "Request":
+    def _make_request(self, headers: dict):
         from starlette.requests import Request
 
         scope = {
@@ -277,23 +277,17 @@ class TestIAPHeaderParsing(unittest.TestCase):
         req = self._make_request(
             {"x-goog-authenticated-user-email": "accounts.google.com:user@example.com"}
         )
-        self.assertEqual(
-            middleware._extract_iap_user_email(req), "user@example.com"
-        )
+        self.assertEqual(middleware._extract_iap_user_email(req), "user@example.com")
 
     def test_xgoog_authenticated_user_email_no_prefix(self):
         req = self._make_request(
             {"x-goog-authenticated-user-email": "user@example.com"}
         )
-        self.assertEqual(
-            middleware._extract_iap_user_email(req), "user@example.com"
-        )
+        self.assertEqual(middleware._extract_iap_user_email(req), "user@example.com")
 
     def test_serverless_authorization_fallback(self):
         req = self._make_request({"x-serverless-authorization": "Bearer eyJtoken"})
-        self.assertEqual(
-            middleware._extract_iap_user_email(req), "Bearer eyJtoken"
-        )
+        self.assertEqual(middleware._extract_iap_user_email(req), "Bearer eyJtoken")
 
     def test_xgoog_takes_priority_over_serverless(self):
         req = self._make_request(
@@ -302,9 +296,7 @@ class TestIAPHeaderParsing(unittest.TestCase):
                 "x-serverless-authorization": "Bearer eyJtoken",
             }
         )
-        self.assertEqual(
-            middleware._extract_iap_user_email(req), "user@example.com"
-        )
+        self.assertEqual(middleware._extract_iap_user_email(req), "user@example.com")
 
     def test_no_iap_headers(self):
         req = self._make_request({})
