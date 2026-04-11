@@ -35,6 +35,10 @@ request_span: ContextVar[str] = ContextVar("gcp_span", default="")
 #: Whether the trace is sampled.
 request_trace_sampled: ContextVar[bool] = ContextVar("gcp_trace_sampled", default=False)
 
+#: Authenticated user email extracted from IAP headers
+#: (``x-goog-authenticated-user-email`` or ``x-serverless-authorization``).
+request_user_email: ContextVar[str] = ContextVar("gcp_user_email", default="")
+
 # ---------------------------------------------------------------------------
 # Python log-level → GCP severity mapping
 # ---------------------------------------------------------------------------
@@ -143,6 +147,14 @@ class GCPFormatter(logging.Formatter):
 
         if span:
             payload["logging.googleapis.com/spanId"] = span
+
+        # -- IAP authenticated user -----------------------------------
+        user_email = request_user_email.get()
+        if user_email:
+            payload.setdefault("logging.googleapis.com/labels", {})
+            payload["logging.googleapis.com/labels"]["authenticated_user_email"] = (
+                user_email
+            )
 
         # -- Exception / stack info -----------------------------------
         if record.exc_info and record.exc_info[0] is not None:
