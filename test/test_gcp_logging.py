@@ -1,0 +1,264 @@
+"""
+Unit tests for starlette_gcp_logging.
+"""
+
+from __future__ import annotations
+
+import io
+import json
+import logging
+import unittest
+import unittest.mock
+
+from starlette_gcp_logging import _metadata, formatter, middleware
+
+
+class TestGCPFormatter(unittest.TestCase):
+    def _make_handler(
+        self, project_id: str | None = None
+    ) -> tuple[logging.Logger, io.StringIO]:
+        buf = io.StringIO()
+        handler = logging.StreamHandler(buf)
+        handler.setFormatter(formatter.GCPFormatter(project_id=project_id))
+        log = logging.getLogger(f"test_{id(buf)}")
+        log.handlers = [handler]
+        log.propagate = False
+        log.setLevel(logging.DEBUG)
+        return log, buf
+
+    def test_basic_fields(self):
+        log, buf = self._make_handler()
+        log.info("hello world")
+        payload = json.loads(buf.getvalue())
+
+        self.assertEqual(payload["severity"], "INFO")
+        self.assertEqual(payload["message"], "hello world")
+        self.assertIn("time", payload)
+        self.assertEqual(
+            payload["logging.googleapis.com/sourceLocation"]["function"],
+            "test_basic_fields",
+        )
+
+    def test_severity_mapping(self):
+        log, buf = self._make_handler()
+        log.debug("d")
+        log.warning("w")
+        log.error("e")
+        log.critical("c")
+        lines = [json.loads(line) for line in buf.getvalue().strip().splitlines()]
+        self.assertEqual(
+            [line["severity"] for line in lines],
+            ["DEBUG", "WARNING", "ERROR", "CRITICAL"],
+        )
+
+    def test_extra_fields(self):
+        log, buf = self._make_handler()
+        log.info("msg", extra={"user_id": "u123", "region": "us-east1"})
+        payload = json.loads(buf.getvalue())
+        self.assertEqual(payload["user_id"], "u123")
+        self.assertEqual(payload["region"], "us-east1")
+
+    def test_exception_included(self):
+        log, buf = self._make_handler()
+        try:
+            raise ValueError("boom")
+        except ValueError:
+            log.exception("caught it")
+        payload = json.loads(buf.getvalue())
+        self.assertIn("ValueError", payload["exception"])
+        self.assertTrue(payload["@type"].endswith("ReportedErrorEvent"))
+
+    def test_trace_context(self):
+        log, buf = self._make_handler(project_id="my-project")
+
+        tok_t = formatter.request_trace.set("abc123")
+        tok_s = formatter.request_span.set("00f067aa0ba902b7")
+        tok_m = formatter.request_trace_sampled.set(True)
+        try:
+            log.info("traced message")
+        finally:
+            formatter.request_trace.reset(tok_t)
+            formatter.request_span.reset(tok_s)
+            formatter.request_trace_sampled.reset(tok_m)
+
+        payload = json.loads(buf.getvalue())
+        self.assertEqual(
+            payload["logging.googleapis.com/trace"],
+            "projects/my-project/traces/abc123",
+        )
+        self.assertEqual(payload["logging.googleapis.com/spanId"], "00f067aa0ba902b7")
+        self.assertTrue(payload["logging.googleapis.com/traceSampled"])
+
+    def test_project_id_auto_detected(self):
+        _metadata.get_project_id.cache_clear()
+        try:
+            with unittest.mock.patch(
+                "starlette_gcp_logging._metadata.get_project_id",
+                return_value="auto-project",
+            ):
+                log, buf = self._make_handler()
+                tok = formatter.request_trace.set("deadbeef")
+                try:
+                    log.info("auto project test")
+                finally:
+                    formatter.request_trace.reset(tok)
+
+                payload = json.loads(buf.getvalue())
+                self.assertEqual(
+                    payload["logging.googleapis.com/trace"],
+                    "projects/auto-project/traces/deadbeef",
+                )
+        finally:
+            _metadata.get_project_id.cache_clear()
+
+
+class TestTraceHeaderParsing(unittest.TestCase):
+    def test_parse_xctc_full(self):
+        trace, span, sampled = middleware._parse_xctc(
+            "105445aa7843bc8bf206b120001000/1;o=1"
+        )
+        self.assertEqual(trace, "105445aa7843bc8bf206b120001000")
+        self.assertEqual(span, format(1, "016x"))
+        self.assertTrue(sampled)
+
+    def test_parse_xctc_no_span(self):
+        trace, span, sampled = middleware._parse_xctc("105445aa7843bc8bf206b120001000")
+        self.assertEqual(trace, "105445aa7843bc8bf206b120001000")
+        self.assertEqual(span, "")
+        self.assertFalse(sampled)
+
+    def test_parse_traceparent_sampled(self):
+        trace, span, sampled = middleware._parse_traceparent(
+            "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+        )
+        self.assertEqual(trace, "4bf92f3577b34da6a3ce929d0e0e4736")
+        self.assertEqual(span, "00f067aa0ba902b7")
+        self.assertTrue(sampled)
+
+    def test_parse_traceparent_unsampled(self):
+        _, _, sampled = middleware._parse_traceparent(
+            "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-00"
+        )
+        self.assertFalse(sampled)
+
+
+class TestMetadata(unittest.TestCase):
+    def setUp(self):
+        _metadata.get_project_id.cache_clear()
+
+    def tearDown(self):
+        _metadata.get_project_id.cache_clear()
+
+    def test_fallback_outside_gcp(self):
+        result = _metadata.get_project_id()
+        self.assertIsInstance(result, str)
+
+    def test_result_is_cached(self):
+        first = _metadata.get_project_id()
+        second = _metadata.get_project_id()
+        self.assertIs(first, second)
+
+
+class TestGCPRequestLoggingMiddleware(unittest.TestCase):
+    def setUp(self):
+        from starlette.applications import Starlette
+        from starlette.requests import Request
+        from starlette.responses import JSONResponse, Response
+        from starlette.routing import Route
+
+        async def homepage(request: Request):
+            logging.getLogger("app").info("inside handler")
+            return JSONResponse({"ok": True})
+
+        async def bad(request: Request):
+            return Response(status_code=503)
+
+        self.app = Starlette(routes=[Route("/", homepage), Route("/bad", bad)])
+        self.app.add_middleware(
+            middleware.GCPRequestLoggingMiddleware,
+            project_id="my-project",
+        )
+
+        self.buf = io.StringIO()
+        self.handler = logging.StreamHandler(self.buf)
+        self.handler.setFormatter(formatter.GCPFormatter(project_id="my-project"))
+        self.root = logging.getLogger()
+        self.root.addHandler(self.handler)
+        self.root.setLevel(logging.DEBUG)
+
+    def tearDown(self):
+        self.root.removeHandler(self.handler)
+
+    def _lines(self) -> list[dict]:
+        return [
+            json.loads(line)
+            for line in self.buf.getvalue().strip().splitlines()
+            if line.strip()
+        ]
+
+    def test_request_log_entry(self):
+        from starlette.testclient import TestClient
+
+        client = TestClient(self.app, raise_server_exceptions=False)
+        resp = client.get(
+            "/",
+            headers={
+                "X-Cloud-Trace-Context": "105445aa7843bc8bf206b120001000/1;o=1",
+                "User-Agent": "test-agent/1.0",
+            },
+        )
+        self.assertEqual(resp.status_code, 200)
+
+        lines = self._lines()
+        self.assertGreaterEqual(len(lines), 2)
+
+        mw_entry = next(line for line in lines if "httpRequest" in line)
+        self.assertEqual(mw_entry["httpRequest"]["requestMethod"], "GET")
+        self.assertEqual(mw_entry["httpRequest"]["status"], 200)
+        self.assertIn("latency", mw_entry["httpRequest"])
+        self.assertEqual(mw_entry["httpRequest"]["userAgent"], "test-agent/1.0")
+
+    def test_trace_propagated_to_all_loggers(self):
+        from starlette.testclient import TestClient
+
+        client = TestClient(self.app, raise_server_exceptions=False)
+        client.get(
+            "/",
+            headers={"X-Cloud-Trace-Context": "105445aa7843bc8bf206b120001000/1;o=1"},
+        )
+
+        traced = [
+            line for line in self._lines() if "logging.googleapis.com/trace" in line
+        ]
+        self.assertGreaterEqual(len(traced), 2)
+        for entry in traced:
+            self.assertIn(
+                "projects/my-project/traces/",
+                entry["logging.googleapis.com/trace"],
+            )
+
+    def test_5xx_logged_as_error(self):
+        from starlette.testclient import TestClient
+
+        self.root.removeHandler(self.handler)
+        buf = io.StringIO()
+        h = logging.StreamHandler(buf)
+        h.setFormatter(formatter.GCPFormatter())
+        mw_logger = logging.getLogger("starlette_gcp_logging.middleware")
+        mw_logger.addHandler(h)
+        mw_logger.setLevel(logging.DEBUG)
+        mw_logger.propagate = False
+
+        try:
+            client = TestClient(self.app, raise_server_exceptions=False)
+            client.get("/bad")
+            entry = json.loads(buf.getvalue().strip())
+            self.assertEqual(entry["severity"], "ERROR")
+            self.assertEqual(entry["httpRequest"]["status"], 503)
+        finally:
+            mw_logger.removeHandler(h)
+            mw_logger.propagate = True
+
+
+if __name__ == "__main__":
+    unittest.main()
