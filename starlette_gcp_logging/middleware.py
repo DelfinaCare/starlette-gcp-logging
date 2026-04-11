@@ -82,6 +82,33 @@ def _parse_traceparent(header: str) -> tuple[str, str, bool]:
     return parts[1], parts[2], sampled
 
 
+def _extract_iap_user_email(request: Request) -> str:
+    """Return the authenticated user email from IAP headers, or ``""`` if absent.
+
+    Two header sources are supported:
+
+    * ``x-goog-authenticated-user-email`` — set by IAP when Cloud Run is behind
+      a load balancer.  Values are prefixed with ``accounts.google.com:``, which
+      is stripped before returning.
+    * ``x-serverless-authorization`` — set by IAP when accessed directly through
+      Cloud Run (without a load balancer).  The raw value is returned as-is since
+      it is an opaque JWT bearer token.
+
+    The first header found in the priority order above is used.
+    """
+    email_header = request.headers.get("x-goog-authenticated-user-email")
+    if email_header:
+        # Strip the identity-provider prefix, e.g. "accounts.google.com:user@example.com"
+        _, _, email = email_header.partition(":")
+        return email or email_header
+
+    serverless_auth = request.headers.get("x-serverless-authorization")
+    if serverless_auth:
+        return serverless_auth
+
+    return ""
+
+
 def _extract_trace_context(request: Request) -> tuple[str, str, bool]:
     """Return ``(trace_id, span_id, sampled)`` from the best available header.
 
@@ -144,6 +171,7 @@ class GCPRequestLoggingMiddleware(BaseHTTPMiddleware):
         call_next: Callable[[Request], Awaitable[Response]],
     ) -> Response:
         trace_id, span_id, sampled = _extract_trace_context(request)
+        user_email = _extract_iap_user_email(request)
 
         # Store the bare trace ID; GCPFormatter is responsible for building
         # the full "projects/<id>/traces/<trace_id>" resource name when it has
@@ -151,6 +179,7 @@ class GCPRequestLoggingMiddleware(BaseHTTPMiddleware):
         trace_tok = formatter.request_trace.set(trace_id)
         span_tok = formatter.request_span.set(span_id)
         sampled_tok = formatter.request_trace_sampled.set(sampled)
+        email_tok = formatter.request_user_email.set(user_email)
 
         status_code = 500
         start = time.perf_counter()
@@ -171,6 +200,7 @@ class GCPRequestLoggingMiddleware(BaseHTTPMiddleware):
             formatter.request_trace.reset(trace_tok)
             formatter.request_span.reset(span_tok)
             formatter.request_trace_sampled.reset(sampled_tok)
+            formatter.request_user_email.reset(email_tok)
 
     # ------------------------------------------------------------------
     # Internal helpers

@@ -260,5 +260,152 @@ class TestGCPRequestLoggingMiddleware(unittest.TestCase):
             mw_logger.propagate = True
 
 
+class TestIAPHeaderParsing(unittest.TestCase):
+    def _make_request(self, headers: dict):
+        from starlette.requests import Request
+
+        scope = {
+            "type": "http",
+            "method": "GET",
+            "path": "/",
+            "query_string": b"",
+            "headers": [(k.lower().encode(), v.encode()) for k, v in headers.items()],
+        }
+        return Request(scope)
+
+    def test_xgoog_authenticated_user_email(self):
+        req = self._make_request(
+            {"x-goog-authenticated-user-email": "accounts.google.com:user@example.com"}
+        )
+        self.assertEqual(middleware._extract_iap_user_email(req), "user@example.com")
+
+    def test_xgoog_authenticated_user_email_no_prefix(self):
+        req = self._make_request(
+            {"x-goog-authenticated-user-email": "user@example.com"}
+        )
+        self.assertEqual(middleware._extract_iap_user_email(req), "user@example.com")
+
+    def test_serverless_authorization_fallback(self):
+        req = self._make_request({"x-serverless-authorization": "Bearer eyJtoken"})
+        self.assertEqual(middleware._extract_iap_user_email(req), "Bearer eyJtoken")
+
+    def test_xgoog_takes_priority_over_serverless(self):
+        req = self._make_request(
+            {
+                "x-goog-authenticated-user-email": "accounts.google.com:user@example.com",
+                "x-serverless-authorization": "Bearer eyJtoken",
+            }
+        )
+        self.assertEqual(middleware._extract_iap_user_email(req), "user@example.com")
+
+    def test_no_iap_headers(self):
+        req = self._make_request({})
+        self.assertEqual(middleware._extract_iap_user_email(req), "")
+
+
+class TestGCPFormatterUserEmail(unittest.TestCase):
+    def _make_handler(self) -> tuple[logging.Logger, io.StringIO]:
+        buf = io.StringIO()
+        handler = logging.StreamHandler(buf)
+        handler.setFormatter(formatter.GCPFormatter(project_id="test-project"))
+        log = logging.getLogger(f"test_email_{id(buf)}")
+        log.handlers = [handler]
+        log.propagate = False
+        log.setLevel(logging.DEBUG)
+        return log, buf
+
+    def test_user_email_in_labels(self):
+        log, buf = self._make_handler()
+        tok = formatter.request_user_email.set("user@example.com")
+        try:
+            log.info("request with iap user")
+        finally:
+            formatter.request_user_email.reset(tok)
+
+        payload = json.loads(buf.getvalue())
+        self.assertEqual(
+            payload["logging.googleapis.com/labels"]["authenticated_user_email"],
+            "user@example.com",
+        )
+
+    def test_no_labels_when_no_email(self):
+        log, buf = self._make_handler()
+        log.info("request without iap user")
+        payload = json.loads(buf.getvalue())
+        self.assertNotIn("logging.googleapis.com/labels", payload)
+
+
+class TestMiddlewareIAPPropagation(unittest.TestCase):
+    def setUp(self):
+        from starlette.applications import Starlette
+        from starlette.requests import Request
+        from starlette.responses import JSONResponse
+        from starlette.routing import Route
+
+        async def homepage(request: Request):
+            logging.getLogger("app").info("inside handler")
+            return JSONResponse({"ok": True})
+
+        self.app = Starlette(routes=[Route("/", homepage)])
+        self.app.add_middleware(
+            middleware.GCPRequestLoggingMiddleware,
+            project_id="my-project",
+        )
+
+        self.buf = io.StringIO()
+        self.handler = logging.StreamHandler(self.buf)
+        self.handler.setFormatter(formatter.GCPFormatter(project_id="my-project"))
+        self.root = logging.getLogger()
+        self.root.addHandler(self.handler)
+        self.root.setLevel(logging.DEBUG)
+
+    def tearDown(self):
+        self.root.removeHandler(self.handler)
+
+    def _lines(self) -> list[dict]:
+        return [
+            json.loads(line)
+            for line in self.buf.getvalue().strip().splitlines()
+            if line.strip()
+        ]
+
+    def test_iap_email_propagated_to_all_log_entries(self):
+        from starlette.testclient import TestClient
+
+        client = TestClient(self.app, raise_server_exceptions=False)
+        client.get(
+            "/",
+            headers={
+                "x-goog-authenticated-user-email": "accounts.google.com:user@example.com"
+            },
+        )
+
+        # Only examine entries produced inside the request context (app and middleware
+        # loggers).  httpx logs its own entries outside the context so they won't
+        # carry the IAP label.
+        app_entries = [
+            entry
+            for entry in self._lines()
+            if entry.get("logger", "").startswith(("app", "starlette_gcp_logging"))
+        ]
+        self.assertGreaterEqual(len(app_entries), 2)
+        for entry in app_entries:
+            self.assertEqual(
+                entry.get("logging.googleapis.com/labels", {}).get(
+                    "authenticated_user_email"
+                ),
+                "user@example.com",
+            )
+
+    def test_no_iap_headers_no_labels(self):
+        from starlette.testclient import TestClient
+
+        client = TestClient(self.app, raise_server_exceptions=False)
+        client.get("/")
+
+        for entry in self._lines():
+            self.assertNotIn("logging.googleapis.com/labels", entry)
+
+
 if __name__ == "__main__":
     unittest.main()
