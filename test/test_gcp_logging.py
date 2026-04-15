@@ -516,9 +516,7 @@ class TestFindRouteTemplate(unittest.TestCase):
             "app": router,
         }
         request = Request(scope)
-        self.assertEqual(
-            middleware._extract_route_path(request), "/v1/items/{item_id}"
-        )
+        self.assertEqual(middleware._extract_route_path(request), "/v1/items/{item_id}")
 
     def test_extract_route_path_no_match_returns_empty(self):
         from starlette.requests import Request

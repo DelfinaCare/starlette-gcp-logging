@@ -135,9 +135,7 @@ def _extract_trace_context(request: Request) -> tuple[str, str, bool]:
 # ---------------------------------------------------------------------------
 
 
-def _find_route_template(
-    router: Any, scope: dict[str, Any]
-) -> str | None:
+def _find_route_template(router: Any, scope: dict[str, Any]) -> str | None:
     """Recursively search *router*'s route table for the path template that
     matches *scope*, e.g. ``'/api/user/{user_id}/task/{task_id}'``.
 
