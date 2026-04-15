@@ -178,8 +178,10 @@ def _extract_route_path(request: Request) -> str:
     """
     app = request.scope.get("app")
     template = _find_route_template(app, request.scope)
+    if template is None:
+        return ""
     root_path = request.scope.get("root_path", "")
-    return root_path + (template or "")
+    return root_path + template
 
 
 # ---------------------------------------------------------------------------
