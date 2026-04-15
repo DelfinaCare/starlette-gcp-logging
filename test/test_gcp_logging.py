@@ -10,7 +10,15 @@ import logging
 import unittest
 import unittest.mock
 
-from starlette_gcp_logging import _metadata, formatter, middleware
+from starlette import applications
+from starlette import requests as starlette_requests
+from starlette import responses
+from starlette import routing
+from starlette import testclient
+
+from starlette_gcp_logging import _metadata
+from starlette_gcp_logging import formatter
+from starlette_gcp_logging import middleware
 
 
 class TestGCPFormatter(unittest.TestCase):
@@ -161,19 +169,16 @@ class TestMetadata(unittest.TestCase):
 
 class TestGCPRequestLoggingMiddleware(unittest.TestCase):
     def setUp(self):
-        from starlette.applications import Starlette
-        from starlette.requests import Request
-        from starlette.responses import JSONResponse, Response
-        from starlette.routing import Route
-
-        async def homepage(request: Request):
+        async def homepage(request: starlette_requests.Request):
             logging.getLogger("app").info("inside handler")
-            return JSONResponse({"ok": True})
+            return responses.JSONResponse({"ok": True})
 
-        async def bad(request: Request):
-            return Response(status_code=503)
+        async def bad(request: starlette_requests.Request):
+            return responses.Response(status_code=503)
 
-        self.app = Starlette(routes=[Route("/", homepage), Route("/bad", bad)])
+        self.app = applications.Starlette(
+            routes=[routing.Route("/", homepage), routing.Route("/bad", bad)]
+        )
         self.app.add_middleware(
             middleware.GCPRequestLoggingMiddleware,
             project_id="my-project",
@@ -197,9 +202,7 @@ class TestGCPRequestLoggingMiddleware(unittest.TestCase):
         ]
 
     def test_request_log_entry(self):
-        from starlette.testclient import TestClient
-
-        client = TestClient(self.app, raise_server_exceptions=False)
+        client = testclient.TestClient(self.app, raise_server_exceptions=False)
         resp = client.get(
             "/",
             headers={
@@ -219,9 +222,7 @@ class TestGCPRequestLoggingMiddleware(unittest.TestCase):
         self.assertEqual(mw_entry["httpRequest"]["userAgent"], "test-agent/1.0")
 
     def test_trace_propagated_to_all_loggers(self):
-        from starlette.testclient import TestClient
-
-        client = TestClient(self.app, raise_server_exceptions=False)
+        client = testclient.TestClient(self.app, raise_server_exceptions=False)
         client.get(
             "/",
             headers={"X-Cloud-Trace-Context": "105445aa7843bc8bf206b120001000/1;o=1"},
@@ -238,8 +239,6 @@ class TestGCPRequestLoggingMiddleware(unittest.TestCase):
             )
 
     def test_5xx_logged_as_error(self):
-        from starlette.testclient import TestClient
-
         self.root.removeHandler(self.handler)
         buf = io.StringIO()
         h = logging.StreamHandler(buf)
@@ -250,7 +249,7 @@ class TestGCPRequestLoggingMiddleware(unittest.TestCase):
         mw_logger.propagate = False
 
         try:
-            client = TestClient(self.app, raise_server_exceptions=False)
+            client = testclient.TestClient(self.app, raise_server_exceptions=False)
             client.get("/bad")
             entry = json.loads(buf.getvalue().strip())
             self.assertEqual(entry["severity"], "ERROR")
@@ -262,8 +261,6 @@ class TestGCPRequestLoggingMiddleware(unittest.TestCase):
 
 class TestIAPHeaderParsing(unittest.TestCase):
     def _make_request(self, headers: dict):
-        from starlette.requests import Request
-
         scope = {
             "type": "http",
             "method": "GET",
@@ -271,7 +268,7 @@ class TestIAPHeaderParsing(unittest.TestCase):
             "query_string": b"",
             "headers": [(k.lower().encode(), v.encode()) for k, v in headers.items()],
         }
-        return Request(scope)
+        return starlette_requests.Request(scope)
 
     def test_xgoog_authenticated_user_email(self):
         req = self._make_request(
@@ -337,16 +334,11 @@ class TestGCPFormatterUserEmail(unittest.TestCase):
 
 class TestMiddlewareIAPPropagation(unittest.TestCase):
     def setUp(self):
-        from starlette.applications import Starlette
-        from starlette.requests import Request
-        from starlette.responses import JSONResponse
-        from starlette.routing import Route
-
-        async def homepage(request: Request):
+        async def homepage(request: starlette_requests.Request):
             logging.getLogger("app").info("inside handler")
-            return JSONResponse({"ok": True})
+            return responses.JSONResponse({"ok": True})
 
-        self.app = Starlette(routes=[Route("/", homepage)])
+        self.app = applications.Starlette(routes=[routing.Route("/", homepage)])
         self.app.add_middleware(
             middleware.GCPRequestLoggingMiddleware,
             project_id="my-project",
@@ -370,9 +362,7 @@ class TestMiddlewareIAPPropagation(unittest.TestCase):
         ]
 
     def test_iap_email_propagated_to_all_log_entries(self):
-        from starlette.testclient import TestClient
-
-        client = TestClient(self.app, raise_server_exceptions=False)
+        client = testclient.TestClient(self.app, raise_server_exceptions=False)
         client.get(
             "/",
             headers={
@@ -398,9 +388,7 @@ class TestMiddlewareIAPPropagation(unittest.TestCase):
             )
 
     def test_no_iap_headers_no_labels(self):
-        from starlette.testclient import TestClient
-
-        client = TestClient(self.app, raise_server_exceptions=False)
+        client = testclient.TestClient(self.app, raise_server_exceptions=False)
         client.get("/")
 
         for entry in self._lines():
@@ -468,43 +456,40 @@ class TestFindRouteTemplate(unittest.TestCase):
         }
 
     def test_simple_route_no_params(self):
-        from starlette.routing import Route, Router
-
-        router = Router(routes=[Route("/health", lambda r: None)])
+        router = routing.Router(routes=[routing.Route("/health", lambda r: None)])
         result = middleware._find_route_template(router, self._make_scope("/health"))
         self.assertEqual(result, "/health")
 
     def test_simple_route_with_params(self):
-        from starlette.routing import Route, Router
-
-        router = Router(routes=[Route("/user/{user_id}", lambda r: None)])
+        router = routing.Router(
+            routes=[routing.Route("/user/{user_id}", lambda r: None)]
+        )
         result = middleware._find_route_template(router, self._make_scope("/user/42"))
         self.assertEqual(result, "/user/{user_id}")
 
     def test_nested_mount(self):
-        from starlette.routing import Mount, Route, Router
-
-        inner = Router(routes=[Route("/task/{task_id}", lambda r: None)])
-        router = Router(routes=[Mount("/api/user/{user_id}", app=inner)])
+        inner = routing.Router(
+            routes=[routing.Route("/task/{task_id}", lambda r: None)]
+        )
+        router = routing.Router(
+            routes=[routing.Mount("/api/user/{user_id}", app=inner)]
+        )
         result = middleware._find_route_template(
             router, self._make_scope("/api/user/123/task/abc")
         )
         self.assertEqual(result, "/api/user/{user_id}/task/{task_id}")
 
     def test_no_match_returns_none(self):
-        from starlette.routing import Route, Router
-
-        router = Router(routes=[Route("/exists", lambda r: None)])
+        router = routing.Router(routes=[routing.Route("/exists", lambda r: None)])
         result = middleware._find_route_template(
             router, self._make_scope("/does-not-exist")
         )
         self.assertIsNone(result)
 
     def test_extract_route_path_includes_root_path(self):
-        from starlette.requests import Request
-        from starlette.routing import Route, Router
-
-        router = Router(routes=[Route("/items/{item_id}", lambda r: None)])
+        router = routing.Router(
+            routes=[routing.Route("/items/{item_id}", lambda r: None)]
+        )
         scope = {
             "type": "http",
             "method": "GET",
@@ -515,14 +500,11 @@ class TestFindRouteTemplate(unittest.TestCase):
             "path_params": {},
             "app": router,
         }
-        request = Request(scope)
+        request = starlette_requests.Request(scope)
         self.assertEqual(middleware._extract_route_path(request), "/v1/items/{item_id}")
 
     def test_extract_route_path_no_match_returns_empty(self):
-        from starlette.requests import Request
-        from starlette.routing import Route, Router
-
-        router = Router(routes=[Route("/exists", lambda r: None)])
+        router = routing.Router(routes=[routing.Route("/exists", lambda r: None)])
         scope = {
             "type": "http",
             "method": "GET",
@@ -533,23 +515,18 @@ class TestFindRouteTemplate(unittest.TestCase):
             "path_params": {},
             "app": router,
         }
-        request = Request(scope)
+        request = starlette_requests.Request(scope)
         self.assertEqual(middleware._extract_route_path(request), "")
 
 
 class TestMiddlewareRoutePropagation(unittest.TestCase):
     def setUp(self):
-        from starlette.applications import Starlette
-        from starlette.requests import Request
-        from starlette.responses import JSONResponse
-        from starlette.routing import Route
-
-        async def user_task(request: Request):
+        async def user_task(request: starlette_requests.Request):
             logging.getLogger("app").info("inside handler")
-            return JSONResponse({"ok": True})
+            return responses.JSONResponse({"ok": True})
 
-        self.app = Starlette(
-            routes=[Route("/api/user/{user_id}/task/{task_id}", user_task)]
+        self.app = applications.Starlette(
+            routes=[routing.Route("/api/user/{user_id}/task/{task_id}", user_task)]
         )
         self.app.add_middleware(
             middleware.GCPRequestLoggingMiddleware,
@@ -574,9 +551,7 @@ class TestMiddlewareRoutePropagation(unittest.TestCase):
         ]
 
     def test_route_label_on_all_log_entries(self):
-        from starlette.testclient import TestClient
-
-        client = TestClient(self.app, raise_server_exceptions=False)
+        client = testclient.TestClient(self.app, raise_server_exceptions=False)
         client.get("/api/user/123/task/abc")
 
         app_entries = [
@@ -594,9 +569,7 @@ class TestMiddlewareRoutePropagation(unittest.TestCase):
             )
 
     def test_no_route_label_on_unmatched_path(self):
-        from starlette.testclient import TestClient
-
-        client = TestClient(self.app, raise_server_exceptions=False)
+        client = testclient.TestClient(self.app, raise_server_exceptions=False)
         client.get("/does-not-exist")
 
         mw_entries = [
