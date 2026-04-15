@@ -14,6 +14,7 @@ can parse and surface in the Logs Explorer HTTP-request view.
 
 from __future__ import annotations
 
+import collections.abc
 import logging
 import time
 from typing import Any, Awaitable, Callable
@@ -135,7 +136,7 @@ def _extract_trace_context(request: Request) -> tuple[str, str, bool]:
 # ---------------------------------------------------------------------------
 
 
-def _find_route_template(router: Any, scope: dict[str, Any]) -> str | None:
+def _find_route_template(router: Any, scope: collections.abc.Mapping[str, Any]) -> str | None:
     """Recursively search *router*'s route table for the path template that
     matches *scope*, e.g. ``'/api/user/{user_id}/task/{task_id}'``.
 
