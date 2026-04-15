@@ -33,8 +33,8 @@ request_span: ContextVar[str] = ContextVar("gcp_span", default="")
 #: Whether the trace is sampled.
 request_trace_sampled: ContextVar[bool] = ContextVar("gcp_trace_sampled", default=False)
 
-#: Authenticated user email extracted from IAP headers
-#: (``x-goog-authenticated-user-email`` or ``x-serverless-authorization``).
+#: Authenticated user email extracted from IAP header
+#: ``x-goog-authenticated-user-email``.
 request_user_email: ContextVar[str] = ContextVar("gcp_user_email", default="")
 
 #: Starlette route path template, e.g. ``"/api/user/{user_id}/task/{task_id}"``.
