@@ -38,3 +38,10 @@ from module import submodule_b
 ```python
 from module import submodule_a, submodule_b
 ```
+
+## Type Checking
+Please run mypy to check for type errors in the code. A few points about mypy:
+
+We only support python 3.11 and above, so please do not use unnecessary imports
+from the `typing` module, such as `List`, `Dict`, etc. Instead, please use the
+built-in types, such as `list`, `dict`, etc, or the `collections.abc` module.
