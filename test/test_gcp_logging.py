@@ -10,10 +10,15 @@ import logging
 import unittest
 import unittest.mock
 
-from starlette import applications, responses, routing, testclient
+from starlette import applications
 from starlette import requests as starlette_requests
+from starlette import responses
+from starlette import routing
+from starlette import testclient
 
-from starlette_gcp_logging import _metadata, formatter, middleware
+from starlette_gcp_logging import _metadata
+from starlette_gcp_logging import formatter
+from starlette_gcp_logging import middleware
 
 
 class TestGCPFormatter(unittest.TestCase):
