@@ -14,8 +14,8 @@ import datetime
 import json
 import logging
 import traceback
-from contextvars import ContextVar
 import typing
+from contextvars import ContextVar
 
 from . import _metadata
 

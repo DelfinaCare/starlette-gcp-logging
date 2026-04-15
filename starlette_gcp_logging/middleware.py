@@ -222,7 +222,9 @@ class GCPRequestLoggingMiddleware(BaseHTTPMiddleware):
     async def dispatch(
         self,
         request: Request,
-        call_next: collections.abc.Callable[[Request], collections.abc.Awaitable[Response]],
+        call_next: collections.abc.Callable[
+            [Request], collections.abc.Awaitable[Response]
+        ],
     ) -> Response:
         trace_id, span_id, sampled = _extract_trace_context(request)
         user_email = _extract_iap_user_email(request)
