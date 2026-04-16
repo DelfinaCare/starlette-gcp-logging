@@ -10,9 +10,12 @@ Submodules are also accessible directly for everything else:
     from starlette_gcp_logging import formatter, middleware, _metadata
 """
 
-from . import _metadata, formatter, middleware
-from .formatter import GCPFormatter
-from .middleware import GCPRequestLoggingMiddleware
+from . import _metadata
+from . import formatter
+from . import middleware
+
+GCPFormatter = formatter.GCPFormatter
+GCPRequestLoggingMiddleware = middleware.GCPRequestLoggingMiddleware
 
 __all__ = [
     "GCPFormatter",

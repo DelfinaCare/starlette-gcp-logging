@@ -23,7 +23,8 @@ from starlette.responses import Response
 from starlette.routing import Match
 from starlette.types import ASGIApp
 
-from . import _metadata, formatter
+from . import _metadata
+from . import formatter
 
 logger = logging.getLogger(__name__)
 
@@ -85,26 +86,19 @@ def _parse_traceparent(header: str) -> tuple[str, str, bool]:
 def _extract_iap_user_email(request: Request) -> str:
     """Return the authenticated user email from IAP headers, or ``""`` if absent.
 
-    Two header sources are supported:
+    The only supported source is ``x-goog-authenticated-user-email``.
+    Values are often prefixed with ``accounts.google.com:``; that prefix
+    is stripped before returning.
 
-    * ``x-goog-authenticated-user-email`` — set by IAP when Cloud Run is behind
-      a load balancer.  Values are prefixed with ``accounts.google.com:``, which
-      is stripped before returning.
-    * ``x-serverless-authorization`` — set by IAP when accessed directly through
-      Cloud Run (without a load balancer).  The raw value is returned as-is since
-      it is an opaque JWT bearer token.
-
-    The first header found in the priority order above is used.
+    ``x-serverless-authorization`` is intentionally ignored because it carries
+    an opaque bearer token, not an email address, and logging it would leak
+    credential-like data.
     """
     email_header = request.headers.get("x-goog-authenticated-user-email")
     if email_header:
         # Strip the identity-provider prefix, e.g. "accounts.google.com:user@example.com"
         _, _, email = email_header.partition(":")
         return email or email_header
-
-    serverless_auth = request.headers.get("x-serverless-authorization")
-    if serverless_auth:
-        return serverless_auth
 
     return ""
 

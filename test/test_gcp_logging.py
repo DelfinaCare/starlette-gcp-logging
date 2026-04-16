@@ -282,9 +282,9 @@ class TestIAPHeaderParsing(unittest.TestCase):
         )
         self.assertEqual(middleware._extract_iap_user_email(req), "user@example.com")
 
-    def test_serverless_authorization_fallback(self):
+    def test_serverless_authorization_is_ignored(self):
         req = self._make_request({"x-serverless-authorization": "Bearer eyJtoken"})
-        self.assertEqual(middleware._extract_iap_user_email(req), "Bearer eyJtoken")
+        self.assertEqual(middleware._extract_iap_user_email(req), "")
 
     def test_xgoog_takes_priority_over_serverless(self):
         req = self._make_request(
@@ -392,6 +392,22 @@ class TestMiddlewareIAPPropagation(unittest.TestCase):
         client.get("/")
 
         for entry in self._lines():
+            self.assertNotIn(
+                "authenticated_user_email",
+                entry.get("logging.googleapis.com/labels", {}),
+            )
+
+    def test_serverless_authorization_not_logged_as_email(self):
+        client = testclient.TestClient(self.app, raise_server_exceptions=False)
+        client.get("/", headers={"x-serverless-authorization": "Bearer eyJtoken"})
+
+        app_entries = [
+            entry
+            for entry in self._lines()
+            if entry.get("logger", "").startswith(("app", "starlette_gcp_logging"))
+        ]
+        self.assertGreaterEqual(len(app_entries), 2)
+        for entry in app_entries:
             self.assertNotIn(
                 "authenticated_user_email",
                 entry.get("logging.googleapis.com/labels", {}),
