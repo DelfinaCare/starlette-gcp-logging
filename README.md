@@ -107,3 +107,106 @@ project = _metadata.get_project_id()  # fetches from metadata server, then cache
 Outside GCP (local dev, CI) the metadata request times out after 1 second and
 an empty string is returned — logging continues to work, just without the
 project prefix in the trace resource name.
+
+## Example GCP alerts grouped by Starlette route
+
+The middleware writes the route template to:
+
+- `jsonPayload."logging.googleapis.com/labels"."starlette.dev/route"`
+
+Use that field as a log-based metric label so alerts are grouped per route
+template (for example, `"/items/{item_id}"`).
+
+### 1) 4xx error-rate alert by route
+
+Create two log-based **counter** metrics with the same label extractor:
+
+- `logging.googleapis.com/user/starlette_requests_total`
+- `logging.googleapis.com/user/starlette_requests_4xx`
+
+Filter / extractor examples:
+
+```text
+# total requests
+resource.type="cloud_run_revision"
+jsonPayload.httpRequest.status>=100
+jsonPayload.httpRequest.status<600
+jsonPayload."logging.googleapis.com/labels"."starlette.dev/route"!=""
+
+labelExtractors.route=EXTRACT(jsonPayload."logging.googleapis.com/labels"."starlette.dev/route")
+```
+
+```text
+# 4xx requests
+resource.type="cloud_run_revision"
+jsonPayload.httpRequest.status>=400
+jsonPayload.httpRequest.status<500
+jsonPayload."logging.googleapis.com/labels"."starlette.dev/route"!=""
+
+labelExtractors.route=EXTRACT(jsonPayload."logging.googleapis.com/labels"."starlette.dev/route")
+```
+
+Alerting condition (MQL example, threshold 5% over 5m):
+
+```text
+fetch logging.googleapis.com/user/starlette_requests_4xx
+| align rate(5m)
+| group_by [metric.route], [err: sum(value.rate)]
+| join
+    (fetch logging.googleapis.com/user/starlette_requests_total
+     | align rate(5m)
+     | group_by [metric.route], [all: sum(value.rate)])
+| value [error_rate: err / all]
+| condition error_rate > 0.05 '1'
+```
+
+### 2) 5xx error-rate alert by route
+
+Create a `logging.googleapis.com/user/starlette_requests_5xx` counter metric:
+
+```text
+resource.type="cloud_run_revision"
+jsonPayload.httpRequest.status>=500
+jsonPayload.httpRequest.status<600
+jsonPayload."logging.googleapis.com/labels"."starlette.dev/route"!=""
+
+labelExtractors.route=EXTRACT(jsonPayload."logging.googleapis.com/labels"."starlette.dev/route")
+```
+
+Alerting condition (MQL example, threshold 1% over 5m):
+
+```text
+fetch logging.googleapis.com/user/starlette_requests_5xx
+| align rate(5m)
+| group_by [metric.route], [err: sum(value.rate)]
+| join
+    (fetch logging.googleapis.com/user/starlette_requests_total
+     | align rate(5m)
+     | group_by [metric.route], [all: sum(value.rate)])
+| value [error_rate: err / all]
+| condition error_rate > 0.01 '1'
+```
+
+### 3) Successful-request latency alert by route
+
+Create a log-based **distribution** metric
+`logging.googleapis.com/user/starlette_success_latency_seconds`:
+
+```text
+resource.type="cloud_run_revision"
+jsonPayload.httpRequest.status>=200
+jsonPayload.httpRequest.status<400
+jsonPayload.httpRequest.latency=~".*s"
+jsonPayload."logging.googleapis.com/labels"."starlette.dev/route"!=""
+
+labelExtractors.route=EXTRACT(jsonPayload."logging.googleapis.com/labels"."starlette.dev/route")
+valueExtractor=REGEXP_EXTRACT(jsonPayload.httpRequest.latency, "^([0-9.]+)s$")
+```
+
+Alerting condition (MQL example, p95 latency > 1s over 5m):
+
+```text
+fetch logging.googleapis.com/user/starlette_success_latency_seconds
+| group_by 5m, [metric.route], [p95: percentile(value.distribution, 95)]
+| condition p95 > 1
+```
