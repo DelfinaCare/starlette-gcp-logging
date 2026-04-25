@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import functools
 import logging
+import os
 import urllib.request
 
 _METADATA_URL = "http://metadata.google.internal/computeMetadata/v1/project/project-id"
@@ -28,6 +29,10 @@ def get_project_id() -> str:
     so callers can skip building a full trace resource name without crashing.
     Result is cached for the lifetime of the process.
     """
+    project_id = os.environ.get("GOOGLE_CLOUD_PROJECT", "").strip()
+    if project_id:
+        return project_id
+
     req = urllib.request.Request(
         _METADATA_URL,
         headers={"Metadata-Flavor": "Google"},

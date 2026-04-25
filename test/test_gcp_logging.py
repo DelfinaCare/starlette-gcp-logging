@@ -157,6 +157,17 @@ class TestMetadata(unittest.TestCase):
     def tearDown(self):
         _metadata.get_project_id.cache_clear()
 
+    def test_env_var_used_before_metadata_server(self):
+        with unittest.mock.patch.dict(
+            "os.environ", {"GOOGLE_CLOUD_PROJECT": "env-project"}
+        ):
+            with unittest.mock.patch(
+                "starlette_gcp_logging._metadata.urllib.request.urlopen"
+            ) as mock_urlopen:
+                result = _metadata.get_project_id()
+        self.assertEqual(result, "env-project")
+        mock_urlopen.assert_not_called()
+
     def test_fallback_outside_gcp(self):
         result = _metadata.get_project_id()
         self.assertIsInstance(result, str)
