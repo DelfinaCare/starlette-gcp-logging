@@ -28,7 +28,9 @@ import starlette_gcp_logging
 
 # Wire up the formatter once at startup — all loggers inherit it.
 handler = logging.StreamHandler()
-handler.setFormatter(starlette_gcp_logging.GCPFormatter())   # project_id auto-detected on GCP
+handler.setFormatter(
+    starlette_gcp_logging.GCPFormatter()
+)  # project_id auto-detected on GCP
 logging.basicConfig(handlers=[handler], level=logging.INFO)
 
 app = Starlette(...)
@@ -92,8 +94,8 @@ them up without any explicit propagation.
 from starlette_gcp_logging import formatter
 
 # Inside a request handler:
-print(formatter.request_trace.get())    # "projects/my-project/traces/abc123..."
-print(formatter.request_span.get())     # "00f067aa0ba902b7"
+print(formatter.request_trace.get())  # "projects/my-project/traces/abc123..."
+print(formatter.request_span.get())  # "00f067aa0ba902b7"
 ```
 
 ## Project ID auto-detection
