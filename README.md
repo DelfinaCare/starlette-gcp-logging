@@ -87,9 +87,7 @@ import contextvars
 import logging
 import starlette_gcp_logging
 
-tenant_id: contextvars.ContextVar[str] = contextvars.ContextVar(
-    "tenant_id", default=""
-)
+tenant_id: contextvars.ContextVar[str] = contextvars.ContextVar("tenant_id", default="")
 
 handler = logging.StreamHandler()
 handler.setFormatter(
