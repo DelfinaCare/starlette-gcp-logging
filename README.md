@@ -45,11 +45,12 @@ uvicorn myapp:app --log-config /dev/null   # let GCPFormatter own the output
 
 ## Configuration
 
-### `GCPFormatter(project_id="")`
+### `GCPFormatter(project_id="", *, labels=None)`
 
 | Parameter | Description |
 |---|---|
 | `project_id` | GCP project ID used to build the full trace resource name `projects/<id>/traces/<trace_id>`. When omitted (the default) it is fetched automatically from the [GCP instance metadata server](https://cloud.google.com/compute/docs/metadata/overview) on the first log call and cached for the lifetime of the process. Outside GCP the trace is still written — just without the project prefix. |
+| `labels` | Optional mapping of custom GCP label name → the `ContextVar` its value should be read from. See [Custom labels](#custom-labels) below. |
 
 #### Log record fields emitted
 
@@ -73,6 +74,52 @@ uvicorn myapp:app --log-config /dev/null   # let GCPFormatter own the output
 | `project_id` | Same as `GCPFormatter`. Auto-detected when omitted. |
 | `logger_name` | Logger to write request entries to. Defaults to `starlette_gcp_logging.middleware`. |
 | `default_level` | Log level for 1xx/2xx/3xx responses. 4xx → `WARNING`; 5xx → `ERROR`. |
+
+### Custom labels
+
+Application code often stores per-request data (tenant ID, feature flag,
+API key ID, ...) in its own `contextvars.ContextVar`. Pass a `labels` mapping
+to `GCPFormatter` to surface any of those as GCP labels on *every* log entry
+emitted while the variable holds a value:
+
+```python
+import contextvars
+import logging
+import starlette_gcp_logging
+
+tenant_id: contextvars.ContextVar[str] = contextvars.ContextVar("tenant_id", default="")
+
+handler = logging.StreamHandler()
+handler.setFormatter(
+    starlette_gcp_logging.GCPFormatter(labels={"tenant_id": tenant_id})
+)
+logging.basicConfig(handlers=[handler], level=logging.INFO)
+```
+
+Somewhere earlier in the middleware stack (or in a dependency), set the
+variable for the duration of the request:
+
+```python
+tok = tenant_id.set("acme-corp")
+try:
+    ...
+finally:
+    tenant_id.reset(tok)
+```
+
+Every log entry emitted while `tenant_id` holds a value (including falsy
+values like `False`, `0`, or `""`) will include:
+
+```
+jsonPayload."logging.googleapis.com/labels"."tenant_id" == "acme-corp"
+```
+
+A label is only omitted when its `ContextVar` has not been `.set()` in the
+current context (i.e. it is unset), matching the behavior of the built-in
+`authenticated_user_email` and `starlette.dev/route` labels. This lets you
+distinguish an explicitly-set falsy value (e.g. a `False` feature flag) from
+an unset variable — unlike a truthiness check, `None` is the only value
+treated as "unset".
 
 #### Trace context extraction
 
