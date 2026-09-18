@@ -13,6 +13,7 @@ can parse and surface in the Logs Explorer HTTP-request view.
 """
 
 import collections.abc
+import contextvars
 import logging
 import time
 import typing
@@ -197,6 +198,13 @@ class GCPRequestLoggingMiddleware(BaseHTTPMiddleware):
     default_level:
         Log level used for 1xx/2xx/3xx responses. 4xx responses use WARNING;
         5xx responses use ERROR.
+    labels:
+        Optional mapping of custom GCP label name to the ``ContextVar`` its
+        value should be read from. When a listed ``ContextVar`` holds a
+        truthy value at log time, ``GCPFormatter`` adds it to
+        ``logging.googleapis.com/labels`` under the given label name. The
+        ``ContextVar`` values are typically set by application code (e.g. in
+        another middleware or a dependency) rather than by this middleware.
     """
 
     def __init__(
@@ -206,12 +214,16 @@ class GCPRequestLoggingMiddleware(BaseHTTPMiddleware):
         project_id: str = "",
         logger_name: str = __name__,
         default_level: int = logging.INFO,
+        labels: collections.abc.Mapping[str, "contextvars.ContextVar[typing.Any]"]
+        | None = None,
     ) -> None:
         super().__init__(app)
         # Resolve at startup (one blocking metadata call at most).
         self._project_id = project_id or _metadata.get_project_id()
         self._logger = logging.getLogger(logger_name)
         self._default_level = default_level
+        if labels:
+            formatter.label_context_vars.update(labels)
 
     async def dispatch(
         self,

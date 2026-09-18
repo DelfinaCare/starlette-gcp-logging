@@ -42,6 +42,13 @@ request_user_email: ContextVar[str] = ContextVar("gcp_user_email", default="")
 #: cannot be resolved (e.g. for 404 responses).
 request_route: ContextVar[str] = ContextVar("starlette_route", default="")
 
+#: Optional mapping of custom GCP label name -> the ``ContextVar`` its value
+#: should be read from. Configured via
+#: ``GCPRequestLoggingMiddleware(labels={...})``; ``GCPFormatter`` reads this
+#: mapping on every log call and, when a variable holds a truthy value, adds
+#: it to ``logging.googleapis.com/labels`` under the given label name.
+label_context_vars: dict[str, "ContextVar[typing.Any]"] = {}
+
 # ---------------------------------------------------------------------------
 # Python log-level → GCP severity mapping
 # ---------------------------------------------------------------------------
@@ -164,6 +171,13 @@ class GCPFormatter(logging.Formatter):
         if route:
             payload.setdefault("logging.googleapis.com/labels", {})
             payload["logging.googleapis.com/labels"]["starlette.dev/route"] = route
+
+        # -- Custom labels from user-configured ContextVars ------------
+        for label_name, context_var in label_context_vars.items():
+            value = context_var.get(None)
+            if value:
+                payload.setdefault("logging.googleapis.com/labels", {})
+                payload["logging.googleapis.com/labels"][label_name] = value
 
         # -- Exception / stack info -----------------------------------
         if record.exc_info and record.exc_info[0] is not None:

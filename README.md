@@ -66,13 +66,56 @@ uvicorn myapp:app --log-config /dev/null   # let GCPFormatter own the output
 | `@type` | GCP Error Reporting type URI (when `exc_info` is set) |
 | _(extra keys)_ | Any fields passed via `extra={...}` to the logger |
 
-### `GCPRequestLoggingMiddleware(app, *, project_id="", logger_name=..., default_level=logging.INFO)`
+### `GCPRequestLoggingMiddleware(app, *, project_id="", logger_name=..., default_level=logging.INFO, labels=None)`
 
 | Parameter | Description |
 |---|---|
 | `project_id` | Same as `GCPFormatter`. Auto-detected when omitted. |
 | `logger_name` | Logger to write request entries to. Defaults to `starlette_gcp_logging.middleware`. |
 | `default_level` | Log level for 1xx/2xx/3xx responses. 4xx → `WARNING`; 5xx → `ERROR`. |
+| `labels` | Optional mapping of custom GCP label name → the `ContextVar` its value should be read from. See [Custom labels](#custom-labels) below. |
+
+### Custom labels
+
+Application code often stores per-request data (tenant ID, feature flag,
+API key ID, ...) in its own `contextvars.ContextVar`. Pass a `labels` mapping
+to surface any of those as GCP labels on *every* log entry emitted while the
+variable holds a value:
+
+```python
+import contextvars
+import starlette_gcp_logging
+
+tenant_id: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "tenant_id", default=""
+)
+
+app.add_middleware(
+    starlette_gcp_logging.GCPRequestLoggingMiddleware,
+    labels={"tenant_id": tenant_id},
+)
+```
+
+Somewhere earlier in the middleware stack (or in a dependency), set the
+variable for the duration of the request:
+
+```python
+tok = tenant_id.set("acme-corp")
+try:
+    ...
+finally:
+    tenant_id.reset(tok)
+```
+
+Every log entry emitted while `tenant_id` holds a truthy value will include:
+
+```
+jsonPayload."logging.googleapis.com/labels"."tenant_id" == "acme-corp"
+```
+
+Entries are skipped for a given label when its `ContextVar` is unset or holds
+a falsy value (e.g. `""`), matching the behavior of the built-in
+`authenticated_user_email` and `starlette.dev/route` labels.
 
 #### Trace context extraction
 
