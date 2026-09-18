@@ -103,11 +103,13 @@ class GCPFormatter(logging.Formatter):
         ``_metadata.get_project_id()``.
     labels:
         Optional mapping of custom GCP label name to the ``ContextVar`` its
-        value should be read from. When a listed ``ContextVar`` holds a
-        truthy value at log time, it is added to
-        ``logging.googleapis.com/labels`` under the given label name. The
-        ``ContextVar`` values are typically set by application code (e.g. in
-        middleware or a dependency) rather than by the formatter itself.
+        value should be read from. When a listed ``ContextVar`` has been
+        ``.set()`` in the current context (i.e. holds a non-``None`` value)
+        at log time, it is added to ``logging.googleapis.com/labels`` under
+        the given label name — even if that value is otherwise falsy (e.g.
+        ``False``, ``0``, or ``""``). The ``ContextVar`` values are typically
+        set by application code (e.g. in middleware or a dependency) rather
+        than by the formatter itself.
     """
 
     def __init__(
@@ -184,7 +186,7 @@ class GCPFormatter(logging.Formatter):
         # -- Custom labels from user-configured ContextVars ------------
         for label_name, context_var in self._labels.items():
             value = context_var.get(None)
-            if value:
+            if value is not None:
                 payload.setdefault("logging.googleapis.com/labels", {})
                 payload["logging.googleapis.com/labels"][label_name] = value
 

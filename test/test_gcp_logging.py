@@ -505,7 +505,7 @@ class TestGCPFormatterCustomLabels(unittest.TestCase):
             payload["logging.googleapis.com/labels"]["tenant_id"], "acme-corp"
         )
 
-    def test_no_label_when_contextvar_empty(self):
+    def test_no_label_when_contextvar_unset(self):
         tenant_var: contextvars.ContextVar[str] = contextvars.ContextVar(
             "tenant_id", default=""
         )
@@ -515,6 +515,24 @@ class TestGCPFormatterCustomLabels(unittest.TestCase):
 
         payload = json.loads(buf.getvalue())
         self.assertNotIn("logging.googleapis.com/labels", payload)
+
+    def test_label_included_when_explicitly_falsy(self):
+        flag_var: contextvars.ContextVar[bool | None] = contextvars.ContextVar(
+            "feature_enabled", default=None
+        )
+
+        log, buf = self._make_handler(labels={"feature_enabled": flag_var})
+        tok = flag_var.set(False)
+        try:
+            log.info("request with feature flag off")
+        finally:
+            flag_var.reset(tok)
+
+        payload = json.loads(buf.getvalue())
+        self.assertIn("logging.googleapis.com/labels", payload)
+        self.assertIs(
+            payload["logging.googleapis.com/labels"]["feature_enabled"], False
+        )
 
     def test_no_labels_param_no_custom_labels(self):
         log, buf = self._make_handler()

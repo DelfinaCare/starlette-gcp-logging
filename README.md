@@ -109,15 +109,19 @@ finally:
     tenant_id.reset(tok)
 ```
 
-Every log entry emitted while `tenant_id` holds a truthy value will include:
+Every log entry emitted while `tenant_id` holds a value (including falsy
+values like `False`, `0`, or `""`) will include:
 
 ```
 jsonPayload."logging.googleapis.com/labels"."tenant_id" == "acme-corp"
 ```
 
-Entries are skipped for a given label when its `ContextVar` is unset or holds
-a falsy value (e.g. `""`), matching the behavior of the built-in
-`authenticated_user_email` and `starlette.dev/route` labels.
+A label is only omitted when its `ContextVar` has not been `.set()` in the
+current context (i.e. it is unset), matching the behavior of the built-in
+`authenticated_user_email` and `starlette.dev/route` labels. This lets you
+distinguish an explicitly-set falsy value (e.g. a `False` feature flag) from
+an unset variable — unlike a truthiness check, `None` is the only value
+treated as "unset".
 
 #### Trace context extraction
 
