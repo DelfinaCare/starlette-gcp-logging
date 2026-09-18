@@ -10,6 +10,8 @@ logger used inside a request handler automatically inherits the values set by
 GCPRequestLoggingMiddleware without any explicit plumbing.
 """
 
+import collections.abc
+import contextvars
 import datetime
 import json
 import logging
@@ -41,13 +43,6 @@ request_user_email: ContextVar[str] = ContextVar("gcp_user_email", default="")
 #: Includes ``root_path`` when one is present.  Set to ``""`` when the route
 #: cannot be resolved (e.g. for 404 responses).
 request_route: ContextVar[str] = ContextVar("starlette_route", default="")
-
-#: Optional mapping of custom GCP label name -> the ``ContextVar`` its value
-#: should be read from. Configured via
-#: ``GCPRequestLoggingMiddleware(labels={...})``; ``GCPFormatter`` reads this
-#: mapping on every log call and, when a variable holds a truthy value, adds
-#: it to ``logging.googleapis.com/labels`` under the given label name.
-label_context_vars: dict[str, "ContextVar[typing.Any]"] = {}
 
 # ---------------------------------------------------------------------------
 # Python log-level → GCP severity mapping
@@ -106,11 +101,25 @@ class GCPFormatter(logging.Formatter):
         default) it is fetched from the GCP instance metadata server on
         demand and cached for the lifetime of the process via
         ``_metadata.get_project_id()``.
+    labels:
+        Optional mapping of custom GCP label name to the ``ContextVar`` its
+        value should be read from. When a listed ``ContextVar`` holds a
+        truthy value at log time, it is added to
+        ``logging.googleapis.com/labels`` under the given label name. The
+        ``ContextVar`` values are typically set by application code (e.g. in
+        middleware or a dependency) rather than by the formatter itself.
     """
 
-    def __init__(self, project_id: str | None = None) -> None:
+    def __init__(
+        self,
+        project_id: str | None = None,
+        *,
+        labels: collections.abc.Mapping[str, "contextvars.ContextVar[typing.Any]"]
+        | None = None,
+    ) -> None:
         super().__init__()
         self._project_id = project_id
+        self._labels = dict(labels) if labels else {}
 
     @property
     def project_id(self) -> str:
@@ -173,7 +182,7 @@ class GCPFormatter(logging.Formatter):
             payload["logging.googleapis.com/labels"]["starlette.dev/route"] = route
 
         # -- Custom labels from user-configured ContextVars ------------
-        for label_name, context_var in label_context_vars.items():
+        for label_name, context_var in self._labels.items():
             value = context_var.get(None)
             if value:
                 payload.setdefault("logging.googleapis.com/labels", {})

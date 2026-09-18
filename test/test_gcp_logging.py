@@ -474,26 +474,26 @@ class TestGCPFormatterRoute(unittest.TestCase):
 
 
 class TestGCPFormatterCustomLabels(unittest.TestCase):
-    def _make_handler(self) -> tuple[logging.Logger, io.StringIO]:
+    def _make_handler(
+        self, labels: dict | None = None
+    ) -> tuple[logging.Logger, io.StringIO]:
         buf = io.StringIO()
         handler = logging.StreamHandler(buf)
-        handler.setFormatter(formatter.GCPFormatter(project_id="test-project"))
+        handler.setFormatter(
+            formatter.GCPFormatter(project_id="test-project", labels=labels)
+        )
         log = logging.getLogger(f"test_custom_labels_{id(buf)}")
         log.handlers = [handler]
         log.propagate = False
         log.setLevel(logging.DEBUG)
         return log, buf
 
-    def tearDown(self):
-        formatter.label_context_vars.clear()
-
     def test_custom_label_from_contextvar(self):
         tenant_var: contextvars.ContextVar[str] = contextvars.ContextVar(
             "tenant_id", default=""
         )
-        formatter.label_context_vars["tenant_id"] = tenant_var
 
-        log, buf = self._make_handler()
+        log, buf = self._make_handler(labels={"tenant_id": tenant_var})
         tok = tenant_var.set("acme-corp")
         try:
             log.info("request for tenant")
@@ -509,10 +509,16 @@ class TestGCPFormatterCustomLabels(unittest.TestCase):
         tenant_var: contextvars.ContextVar[str] = contextvars.ContextVar(
             "tenant_id", default=""
         )
-        formatter.label_context_vars["tenant_id"] = tenant_var
 
-        log, buf = self._make_handler()
+        log, buf = self._make_handler(labels={"tenant_id": tenant_var})
         log.info("request without tenant")
+
+        payload = json.loads(buf.getvalue())
+        self.assertNotIn("logging.googleapis.com/labels", payload)
+
+    def test_no_labels_param_no_custom_labels(self):
+        log, buf = self._make_handler()
+        log.info("no labels configured")
 
         payload = json.loads(buf.getvalue())
         self.assertNotIn("logging.googleapis.com/labels", payload)
@@ -521,9 +527,8 @@ class TestGCPFormatterCustomLabels(unittest.TestCase):
         tenant_var: contextvars.ContextVar[str] = contextvars.ContextVar(
             "tenant_id", default=""
         )
-        formatter.label_context_vars["tenant_id"] = tenant_var
 
-        log, buf = self._make_handler()
+        log, buf = self._make_handler(labels={"tenant_id": tenant_var})
         route_tok = formatter.request_route.set("/items/{item_id}")
         tenant_tok = tenant_var.set("acme-corp")
         try:
@@ -536,22 +541,6 @@ class TestGCPFormatterCustomLabels(unittest.TestCase):
         labels = payload["logging.googleapis.com/labels"]
         self.assertEqual(labels["starlette.dev/route"], "/items/{item_id}")
         self.assertEqual(labels["tenant_id"], "acme-corp")
-
-    def test_middleware_registers_labels_mapping(self):
-        tenant_var: contextvars.ContextVar[str] = contextvars.ContextVar(
-            "tenant_id_mw", default=""
-        )
-
-        def homepage(request):
-            return responses.PlainTextResponse("ok")
-
-        app = applications.Starlette(routes=[routing.Route("/", homepage)])
-        middleware.GCPRequestLoggingMiddleware(
-            app,
-            labels={"tenant_id_mw": tenant_var},
-        )
-
-        self.assertIs(formatter.label_context_vars["tenant_id_mw"], tenant_var)
 
 
 class TestFindRouteTemplate(unittest.TestCase):

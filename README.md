@@ -45,11 +45,12 @@ uvicorn myapp:app --log-config /dev/null   # let GCPFormatter own the output
 
 ## Configuration
 
-### `GCPFormatter(project_id="")`
+### `GCPFormatter(project_id="", *, labels=None)`
 
 | Parameter | Description |
 |---|---|
 | `project_id` | GCP project ID used to build the full trace resource name `projects/<id>/traces/<trace_id>`. When omitted (the default) it is fetched automatically from the [GCP instance metadata server](https://cloud.google.com/compute/docs/metadata/overview) on the first log call and cached for the lifetime of the process. Outside GCP the trace is still written — just without the project prefix. |
+| `labels` | Optional mapping of custom GCP label name → the `ContextVar` its value should be read from. See [Custom labels](#custom-labels) below. |
 
 #### Log record fields emitted
 
@@ -66,34 +67,35 @@ uvicorn myapp:app --log-config /dev/null   # let GCPFormatter own the output
 | `@type` | GCP Error Reporting type URI (when `exc_info` is set) |
 | _(extra keys)_ | Any fields passed via `extra={...}` to the logger |
 
-### `GCPRequestLoggingMiddleware(app, *, project_id="", logger_name=..., default_level=logging.INFO, labels=None)`
+### `GCPRequestLoggingMiddleware(app, *, project_id="", logger_name=..., default_level=logging.INFO)`
 
 | Parameter | Description |
 |---|---|
 | `project_id` | Same as `GCPFormatter`. Auto-detected when omitted. |
 | `logger_name` | Logger to write request entries to. Defaults to `starlette_gcp_logging.middleware`. |
 | `default_level` | Log level for 1xx/2xx/3xx responses. 4xx → `WARNING`; 5xx → `ERROR`. |
-| `labels` | Optional mapping of custom GCP label name → the `ContextVar` its value should be read from. See [Custom labels](#custom-labels) below. |
 
 ### Custom labels
 
 Application code often stores per-request data (tenant ID, feature flag,
 API key ID, ...) in its own `contextvars.ContextVar`. Pass a `labels` mapping
-to surface any of those as GCP labels on *every* log entry emitted while the
-variable holds a value:
+to `GCPFormatter` to surface any of those as GCP labels on *every* log entry
+emitted while the variable holds a value:
 
 ```python
 import contextvars
+import logging
 import starlette_gcp_logging
 
 tenant_id: contextvars.ContextVar[str] = contextvars.ContextVar(
     "tenant_id", default=""
 )
 
-app.add_middleware(
-    starlette_gcp_logging.GCPRequestLoggingMiddleware,
-    labels={"tenant_id": tenant_id},
+handler = logging.StreamHandler()
+handler.setFormatter(
+    starlette_gcp_logging.GCPFormatter(labels={"tenant_id": tenant_id})
 )
+logging.basicConfig(handlers=[handler], level=logging.INFO)
 ```
 
 Somewhere earlier in the middleware stack (or in a dependency), set the
