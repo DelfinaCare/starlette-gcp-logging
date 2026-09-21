@@ -10,6 +10,8 @@ logger used inside a request handler automatically inherits the values set by
 GCPRequestLoggingMiddleware without any explicit plumbing.
 """
 
+import collections.abc
+import contextvars
 import datetime
 import json
 import logging
@@ -99,11 +101,27 @@ class GCPFormatter(logging.Formatter):
         default) it is fetched from the GCP instance metadata server on
         demand and cached for the lifetime of the process via
         ``_metadata.get_project_id()``.
+    labels:
+        Optional mapping of custom GCP label name to the ``ContextVar`` its
+        value should be read from. When a listed ``ContextVar`` has been
+        ``.set()`` in the current context (i.e. holds a non-``None`` value)
+        at log time, it is added to ``logging.googleapis.com/labels`` under
+        the given label name — even if that value is otherwise falsy (e.g.
+        ``False``, ``0``, or ``""``). The ``ContextVar`` values are typically
+        set by application code (e.g. in middleware or a dependency) rather
+        than by the formatter itself.
     """
 
-    def __init__(self, project_id: str | None = None) -> None:
+    def __init__(
+        self,
+        project_id: str | None = None,
+        *,
+        labels: collections.abc.Mapping[str, "contextvars.ContextVar[typing.Any]"]
+        | None = None,
+    ) -> None:
         super().__init__()
         self._project_id = project_id
+        self._labels = dict(labels) if labels else {}
 
     @property
     def project_id(self) -> str:
@@ -164,6 +182,13 @@ class GCPFormatter(logging.Formatter):
         if route:
             payload.setdefault("logging.googleapis.com/labels", {})
             payload["logging.googleapis.com/labels"]["starlette.dev/route"] = route
+
+        # -- Custom labels from user-configured ContextVars ------------
+        for label_name, context_var in self._labels.items():
+            value = context_var.get(None)
+            if value is not None:
+                payload.setdefault("logging.googleapis.com/labels", {})
+                payload["logging.googleapis.com/labels"][label_name] = value
 
         # -- Exception / stack info -----------------------------------
         if record.exc_info and record.exc_info[0] is not None:

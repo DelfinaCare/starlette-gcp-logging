@@ -4,6 +4,7 @@ Unit tests for starlette_gcp_logging.
 
 from __future__ import annotations
 
+import contextvars
 import io
 import json
 import logging
@@ -470,6 +471,94 @@ class TestGCPFormatterRoute(unittest.TestCase):
         labels = payload["logging.googleapis.com/labels"]
         self.assertEqual(labels["starlette.dev/route"], "/items/{item_id}")
         self.assertEqual(labels["authenticated_user_email"], "user@example.com")
+
+
+class TestGCPFormatterCustomLabels(unittest.TestCase):
+    def _make_handler(
+        self, labels: dict | None = None
+    ) -> tuple[logging.Logger, io.StringIO]:
+        buf = io.StringIO()
+        handler = logging.StreamHandler(buf)
+        handler.setFormatter(
+            formatter.GCPFormatter(project_id="test-project", labels=labels)
+        )
+        log = logging.getLogger(f"test_custom_labels_{id(buf)}")
+        log.handlers = [handler]
+        log.propagate = False
+        log.setLevel(logging.DEBUG)
+        return log, buf
+
+    def test_custom_label_from_contextvar(self):
+        tenant_var: contextvars.ContextVar[str] = contextvars.ContextVar(
+            "tenant_id", default=""
+        )
+
+        log, buf = self._make_handler(labels={"tenant_id": tenant_var})
+        tok = tenant_var.set("acme-corp")
+        try:
+            log.info("request for tenant")
+        finally:
+            tenant_var.reset(tok)
+
+        payload = json.loads(buf.getvalue())
+        self.assertEqual(
+            payload["logging.googleapis.com/labels"]["tenant_id"], "acme-corp"
+        )
+
+    def test_no_label_when_contextvar_unset(self):
+        tenant_var: contextvars.ContextVar[str] = contextvars.ContextVar(
+            "tenant_id", default=""
+        )
+
+        log, buf = self._make_handler(labels={"tenant_id": tenant_var})
+        log.info("request without tenant")
+
+        payload = json.loads(buf.getvalue())
+        self.assertNotIn("logging.googleapis.com/labels", payload)
+
+    def test_label_included_when_explicitly_falsy(self):
+        flag_var: contextvars.ContextVar[bool | None] = contextvars.ContextVar(
+            "feature_enabled", default=None
+        )
+
+        log, buf = self._make_handler(labels={"feature_enabled": flag_var})
+        tok = flag_var.set(False)
+        try:
+            log.info("request with feature flag off")
+        finally:
+            flag_var.reset(tok)
+
+        payload = json.loads(buf.getvalue())
+        self.assertIn("logging.googleapis.com/labels", payload)
+        self.assertIs(
+            payload["logging.googleapis.com/labels"]["feature_enabled"], False
+        )
+
+    def test_no_labels_param_no_custom_labels(self):
+        log, buf = self._make_handler()
+        log.info("no labels configured")
+
+        payload = json.loads(buf.getvalue())
+        self.assertNotIn("logging.googleapis.com/labels", payload)
+
+    def test_custom_labels_share_labels_dict_with_route(self):
+        tenant_var: contextvars.ContextVar[str] = contextvars.ContextVar(
+            "tenant_id", default=""
+        )
+
+        log, buf = self._make_handler(labels={"tenant_id": tenant_var})
+        route_tok = formatter.request_route.set("/items/{item_id}")
+        tenant_tok = tenant_var.set("acme-corp")
+        try:
+            log.info("combined labels")
+        finally:
+            formatter.request_route.reset(route_tok)
+            tenant_var.reset(tenant_tok)
+
+        payload = json.loads(buf.getvalue())
+        labels = payload["logging.googleapis.com/labels"]
+        self.assertEqual(labels["starlette.dev/route"], "/items/{item_id}")
+        self.assertEqual(labels["tenant_id"], "acme-corp")
 
 
 class TestFindRouteTemplate(unittest.TestCase):
