@@ -62,7 +62,7 @@ uvicorn myapp:app --log-config /dev/null   # let GCPFormatter own the output
 | `logging.googleapis.com/sourceLocation` | `file`, `line`, `function` |
 | `logging.googleapis.com/trace` | Full trace resource name (when a trace ID is present) |
 | `logging.googleapis.com/spanId` | 16-char hex span ID |
-| `logging.googleapis.com/traceSampled` | Boolean sampling flag |
+| `logging.googleapis.com/trace_sampled` | Boolean sampling flag |
 | `exception` | Formatted traceback (when `exc_info` is set) |
 | `@type` | GCP Error Reporting type URI (when `exc_info` is set) |
 | _(extra keys)_ | Any fields passed via `extra={...}` to the logger |
@@ -111,8 +111,14 @@ Every log entry emitted while `tenant_id` holds a value (including falsy
 values like `False`, `0`, or `""`) will include:
 
 ```
-jsonPayload."logging.googleapis.com/labels"."tenant_id" == "acme-corp"
+labels."tenant_id" = "acme-corp"
 ```
+
+Cloud Logging labels are strings, so non-string values are converted:
+`True`/`False` become `"true"`/`"false"` and anything else goes through
+`str()`. Labels set in the request handler appear on the log entries the
+handler emits, but not on the middleware's request entry, which is written
+from the middleware's own context.
 
 A label is only omitted when its `ContextVar` has not been `.set()` in the
 current context (i.e. it is unset), matching the behavior of the built-in
@@ -134,6 +140,16 @@ The middleware reads incoming trace headers in this priority order:
 The extracted trace ID and span ID are stored in `contextvars` for the
 duration of the request, so every logger in the call stack automatically picks
 them up without any explicit propagation.
+
+#### OpenTelemetry
+
+When `opentelemetry-api` is installed (`pip install
+starlette-gcp-logging[opentelemetry]`) and a span is active, `GCPFormatter`
+uses that span's trace ID, span ID and sampling flag instead of the header
+values. Logs then link to the span that was actually exported (for example
+the server span from `opentelemetry-instrumentation-fastapi`), and logs
+written inside spans outside of a request, such as in background threads,
+are correlated too.
 
 ## Accessing trace context manually
 
@@ -159,12 +175,22 @@ project prefix in the trace resource name.
 
 ## Example GCP alerts grouped by Starlette route
 
+Cloud Logging promotes the
+[special JSON fields](https://cloud.google.com/logging/docs/structured-logging#special-payload-fields)
+out of `jsonPayload` when it ingests a structured log line. On the stored
+`LogEntry` the request data is under `httpRequest` and the labels are under
+`labels`, so filters must use `httpRequest.status` and
+`labels."starlette.dev/route"`, not `jsonPayload.httpRequest.status`.
+
 The middleware writes the route template to:
 
-- `jsonPayload."logging.googleapis.com/labels"."starlette.dev/route"`
+- `labels."starlette.dev/route"`
 
 Use that field as a log-based metric label so alerts are grouped per route
-template (for example, `"/items/{item_id}"`).
+template (for example, `"/items/{item_id}"`). On Cloud Run, Cloud Run's own
+request logs (`run.googleapis.com/requests`) also carry `httpRequest`, so
+restrict the filters to the middleware's entries with
+`jsonPayload.logger="starlette_gcp_logging.middleware"`.
 
 ### 1) 4xx error-rate alert by route
 
@@ -178,21 +204,23 @@ Filter / extractor examples:
 ```text
 # total requests
 resource.type="cloud_run_revision"
-jsonPayload.httpRequest.status>=100
-jsonPayload.httpRequest.status<600
-jsonPayload."logging.googleapis.com/labels"."starlette.dev/route"!=""
+httpRequest.status>=100
+httpRequest.status<600
+jsonPayload.logger="starlette_gcp_logging.middleware"
+labels."starlette.dev/route"!=""
 
-labelExtractors.route=EXTRACT(jsonPayload."logging.googleapis.com/labels"."starlette.dev/route")
+labelExtractors.route=EXTRACT(labels."starlette.dev/route")
 ```
 
 ```text
 # 4xx requests
 resource.type="cloud_run_revision"
-jsonPayload.httpRequest.status>=400
-jsonPayload.httpRequest.status<500
-jsonPayload."logging.googleapis.com/labels"."starlette.dev/route"!=""
+httpRequest.status>=400
+httpRequest.status<500
+jsonPayload.logger="starlette_gcp_logging.middleware"
+labels."starlette.dev/route"!=""
 
-labelExtractors.route=EXTRACT(jsonPayload."logging.googleapis.com/labels"."starlette.dev/route")
+labelExtractors.route=EXTRACT(labels."starlette.dev/route")
 ```
 
 Alerting condition (MQL example, threshold 5% over 5m):
@@ -215,11 +243,12 @@ Create a `logging.googleapis.com/user/starlette_requests_5xx` counter metric:
 
 ```text
 resource.type="cloud_run_revision"
-jsonPayload.httpRequest.status>=500
-jsonPayload.httpRequest.status<600
-jsonPayload."logging.googleapis.com/labels"."starlette.dev/route"!=""
+httpRequest.status>=500
+httpRequest.status<600
+jsonPayload.logger="starlette_gcp_logging.middleware"
+labels."starlette.dev/route"!=""
 
-labelExtractors.route=EXTRACT(jsonPayload."logging.googleapis.com/labels"."starlette.dev/route")
+labelExtractors.route=EXTRACT(labels."starlette.dev/route")
 ```
 
 Alerting condition (MQL example, threshold 1% over 5m):
@@ -243,13 +272,14 @@ Create a log-based **distribution** metric
 
 ```text
 resource.type="cloud_run_revision"
-jsonPayload.httpRequest.status>=200
-jsonPayload.httpRequest.status<400
-jsonPayload.httpRequest.latency=~".*s"
-jsonPayload."logging.googleapis.com/labels"."starlette.dev/route"!=""
+httpRequest.status>=200
+httpRequest.status<400
+httpRequest.latency=~".*s"
+jsonPayload.logger="starlette_gcp_logging.middleware"
+labels."starlette.dev/route"!=""
 
-labelExtractors.route=EXTRACT(jsonPayload."logging.googleapis.com/labels"."starlette.dev/route")
-valueExtractor=REGEXP_EXTRACT(jsonPayload.httpRequest.latency, "^([0-9.]+)s$")
+labelExtractors.route=EXTRACT(labels."starlette.dev/route")
+valueExtractor=REGEXP_EXTRACT(httpRequest.latency, "^([0-9.]+)s$")
 ```
 
 Alerting condition (MQL example, p95 latency > 1s over 5m):

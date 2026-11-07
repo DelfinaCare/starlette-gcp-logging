@@ -13,6 +13,7 @@ from __future__ import annotations
 import functools
 import logging
 import os
+import threading
 import urllib.request
 
 _METADATA_URL = "http://metadata.google.internal/computeMetadata/v1/project/project-id"
@@ -20,8 +21,12 @@ _TIMEOUT_S = 1.0  # metadata server is local; fail fast outside GCP
 
 logger = logging.getLogger(__name__)
 
+# Set while the metadata server is being queried. GCPFormatter calls
+# get_project_id() while formatting, so a log record emitted from inside the
+# lookup (e.g. the debug message below) would otherwise recurse forever.
+_lookup_in_progress = threading.local()
 
-@functools.cache
+
 def get_project_id() -> str:
     """Return the GCP project ID, fetching it from the metadata server if needed.
 
@@ -29,6 +34,17 @@ def get_project_id() -> str:
     so callers can skip building a full trace resource name without crashing.
     Result is cached for the lifetime of the process.
     """
+    if getattr(_lookup_in_progress, "active", False):
+        return ""
+    _lookup_in_progress.active = True
+    try:
+        return _get_project_id()
+    finally:
+        _lookup_in_progress.active = False
+
+
+@functools.cache
+def _get_project_id() -> str:
     project_id = os.environ.get("GOOGLE_CLOUD_PROJECT", "").strip()
     if project_id:
         return project_id
@@ -43,3 +59,7 @@ def get_project_id() -> str:
     except Exception as exc:
         logger.debug("Could not fetch project ID from metadata server: %s", exc)
         return ""
+
+
+# Kept so callers (and tests) can reset the cached value as before.
+get_project_id.cache_clear = _get_project_id.cache_clear  # type: ignore[attr-defined]
