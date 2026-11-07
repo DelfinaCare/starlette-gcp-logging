@@ -96,7 +96,8 @@ class TestGCPFormatter(unittest.TestCase):
             "projects/my-project/traces/abc123",
         )
         self.assertEqual(payload["logging.googleapis.com/spanId"], "00f067aa0ba902b7")
-        self.assertTrue(payload["logging.googleapis.com/traceSampled"])
+        self.assertTrue(payload["logging.googleapis.com/trace_sampled"])
+        self.assertNotIn("logging.googleapis.com/traceSampled", payload)
 
     def test_project_id_auto_detected(self):
         _metadata.get_project_id.cache_clear()
@@ -177,6 +178,32 @@ class TestMetadata(unittest.TestCase):
         first = _metadata.get_project_id()
         second = _metadata.get_project_id()
         self.assertIs(first, second)
+
+    def test_logging_during_lookup_does_not_recurse(self):
+        # GCPFormatter resolves the project ID while formatting a traced
+        # record, and the lookup itself logs on failure.
+        buf = io.StringIO()
+        handler = logging.StreamHandler(buf)
+        handler.setFormatter(formatter.GCPFormatter())
+        metadata_logger = logging.getLogger("starlette_gcp_logging._metadata")
+        metadata_logger.addHandler(handler)
+        old_level = metadata_logger.level
+        metadata_logger.setLevel(logging.DEBUG)
+        tok = formatter.request_trace.set("abc123")
+        try:
+            with (
+                unittest.mock.patch.dict("os.environ", {"GOOGLE_CLOUD_PROJECT": ""}),
+                unittest.mock.patch(
+                    "starlette_gcp_logging._metadata.urllib.request.urlopen",
+                    side_effect=OSError("no metadata server"),
+                ),
+            ):
+                self.assertEqual(_metadata.get_project_id(), "")
+        finally:
+            formatter.request_trace.reset(tok)
+            metadata_logger.removeHandler(handler)
+            metadata_logger.setLevel(old_level)
+        self.assertIn("Could not fetch project ID", buf.getvalue())
 
 
 class TestGCPRequestLoggingMiddleware(unittest.TestCase):
@@ -530,9 +557,23 @@ class TestGCPFormatterCustomLabels(unittest.TestCase):
 
         payload = json.loads(buf.getvalue())
         self.assertIn("logging.googleapis.com/labels", payload)
-        self.assertIs(
-            payload["logging.googleapis.com/labels"]["feature_enabled"], False
+        # Cloud Logging labels must be strings.
+        self.assertEqual(
+            payload["logging.googleapis.com/labels"]["feature_enabled"], "false"
         )
+
+    def test_non_string_label_values_are_stringified(self):
+        count_var: contextvars.ContextVar[int] = contextvars.ContextVar("count")
+
+        log, buf = self._make_handler(labels={"count": count_var})
+        tok = count_var.set(3)
+        try:
+            log.info("non-string label")
+        finally:
+            count_var.reset(tok)
+
+        payload = json.loads(buf.getvalue())
+        self.assertEqual(payload["logging.googleapis.com/labels"]["count"], "3")
 
     def test_no_labels_param_no_custom_labels(self):
         log, buf = self._make_handler()
@@ -699,6 +740,53 @@ class TestMiddlewareRoutePropagation(unittest.TestCase):
                 "starlette.dev/route",
                 entry.get("logging.googleapis.com/labels", {}),
             )
+
+
+class TestOpenTelemetryCorrelation(unittest.TestCase):
+    def setUp(self):
+        from opentelemetry.sdk import trace as sdk_trace
+
+        self.tracer = sdk_trace.TracerProvider().get_tracer(__name__)
+        self.buf = io.StringIO()
+        handler = logging.StreamHandler(self.buf)
+        handler.setFormatter(formatter.GCPFormatter(project_id="my-project"))
+        self.log = logging.getLogger(f"test_otel_{id(self)}")
+        self.log.handlers = [handler]
+        self.log.setLevel(logging.DEBUG)
+        self.log.propagate = False
+
+    def test_active_span_used_for_trace_and_span(self):
+        tok_t = formatter.request_trace.set("0" * 31 + "1")
+        tok_s = formatter.request_span.set("0" * 15 + "1")
+        try:
+            with self.tracer.start_as_current_span("work") as span:
+                self.log.info("inside span")
+                ctx = span.get_span_context()
+        finally:
+            formatter.request_trace.reset(tok_t)
+            formatter.request_span.reset(tok_s)
+
+        payload = json.loads(self.buf.getvalue())
+        self.assertEqual(
+            payload["logging.googleapis.com/trace"],
+            f"projects/my-project/traces/{ctx.trace_id:032x}",
+        )
+        self.assertEqual(
+            payload["logging.googleapis.com/spanId"], f"{ctx.span_id:016x}"
+        )
+        self.assertIs(payload["logging.googleapis.com/trace_sampled"], True)
+
+    def test_headers_used_without_active_span(self):
+        tok_t = formatter.request_trace.set("abc123")
+        try:
+            self.log.info("no span")
+        finally:
+            formatter.request_trace.reset(tok_t)
+
+        payload = json.loads(self.buf.getvalue())
+        self.assertEqual(
+            payload["logging.googleapis.com/trace"], "projects/my-project/traces/abc123"
+        )
 
 
 if __name__ == "__main__":

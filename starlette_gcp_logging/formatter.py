@@ -21,6 +21,11 @@ from contextvars import ContextVar
 
 from . import _metadata
 
+try:
+    from opentelemetry import trace as _otel_trace
+except ImportError:  # pragma: no cover - exercised only without opentelemetry-api
+    _otel_trace = None  # type: ignore[assignment]
+
 # ---------------------------------------------------------------------------
 # Per-request context variables (set by middleware, read by formatter)
 # ---------------------------------------------------------------------------
@@ -153,9 +158,7 @@ class GCPFormatter(logging.Formatter):
         }
 
         # -- Trace / span correlation ----------------------------------
-        trace = request_trace.get()
-        span = request_span.get()
-        sampled = request_trace_sampled.get()
+        trace, span, sampled = _current_trace_context()
 
         if trace:
             if self.project_id:
@@ -164,7 +167,7 @@ class GCPFormatter(logging.Formatter):
                 )
             else:
                 payload["logging.googleapis.com/trace"] = trace
-            payload["logging.googleapis.com/traceSampled"] = sampled
+            payload["logging.googleapis.com/trace_sampled"] = sampled
 
         if span:
             payload["logging.googleapis.com/spanId"] = span
@@ -188,7 +191,9 @@ class GCPFormatter(logging.Formatter):
             value = context_var.get(None)
             if value is not None:
                 payload.setdefault("logging.googleapis.com/labels", {})
-                payload["logging.googleapis.com/labels"][label_name] = value
+                payload["logging.googleapis.com/labels"][label_name] = _label_value(
+                    value
+                )
 
         # -- Exception / stack info -----------------------------------
         if record.exc_info and record.exc_info[0] is not None:
@@ -210,8 +215,42 @@ class GCPFormatter(logging.Formatter):
 
 
 # ---------------------------------------------------------------------------
-# JSON serialisation helper
+# Helpers
 # ---------------------------------------------------------------------------
+
+
+def _current_trace_context() -> tuple[str, str, bool]:
+    """Return ``(trace_id, span_id, sampled)`` for the current log record.
+
+    When OpenTelemetry is installed and a span is active, its context is used:
+    it is the span that is actually exported, it exists outside of requests
+    (e.g. background threads), and its sampling decision is the real one.
+    Otherwise fall back to the values the middleware extracted from the
+    incoming request headers.
+    """
+    if _otel_trace is not None:
+        ctx = _otel_trace.get_current_span().get_span_context()
+        if ctx.is_valid:
+            return (
+                format(ctx.trace_id, "032x"),
+                format(ctx.span_id, "016x"),
+                ctx.trace_flags.sampled,
+            )
+    return request_trace.get(), request_span.get(), request_trace_sampled.get()
+
+
+def _label_value(value: typing.Any) -> str:
+    """Cloud Logging labels are a ``map<string, string>``.
+
+    If any value in ``logging.googleapis.com/labels`` is not a string, the
+    logging agent leaves the whole map in ``jsonPayload`` instead of promoting
+    it to ``LogEntry.labels``, which also hides the built-in labels.
+    """
+    if isinstance(value, str):
+        return value
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value)
 
 
 def _json_default(obj: typing.Any) -> typing.Any:
