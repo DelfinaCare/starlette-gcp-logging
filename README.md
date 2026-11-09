@@ -45,12 +45,13 @@ uvicorn myapp:app --log-config /dev/null   # let GCPFormatter own the output
 
 ## Configuration
 
-### `GCPFormatter(project_id="", *, labels=None)`
+### `GCPFormatter(project_id="", *, labels=None, fields=None)`
 
 | Parameter | Description |
 |---|---|
 | `project_id` | GCP project ID used to build the full trace resource name `projects/<id>/traces/<trace_id>`. When omitted (the default) it is fetched automatically from the [GCP instance metadata server](https://cloud.google.com/compute/docs/metadata/overview) on the first log call and cached for the lifetime of the process. Outside GCP the trace is still written — just without the project prefix. |
 | `labels` | Optional mapping of custom GCP label name → the `ContextVar` its value should be read from. See [Custom labels](#custom-labels) below. |
+| `fields` | Optional callable `(record) -> Mapping | None` that returns extra top-level JSON fields for every log entry. See [Custom fields](#custom-fields) below. |
 
 #### Log record fields emitted
 
@@ -65,7 +66,7 @@ uvicorn myapp:app --log-config /dev/null   # let GCPFormatter own the output
 | `logging.googleapis.com/trace_sampled` | Boolean sampling flag |
 | `exception` | Formatted traceback (when `exc_info` is set) |
 | `@type` | GCP Error Reporting type URI (when `exc_info` is set) |
-| _(extra keys)_ | Any fields passed via `extra={...}` to the logger |
+| _(extra keys)_ | Fields from the `fields` callable, `extra={"json_fields": {...}}` and `extra={...}`. See [Custom fields](#custom-fields). |
 
 ### `GCPRequestLoggingMiddleware(app, *, project_id="", logger_name=..., default_level=logging.INFO)`
 
@@ -150,6 +151,76 @@ values. Logs then link to the span that was actually exported (for example
 the server span from `opentelemetry-instrumentation-fastapi`), and logs
 written inside spans outside of a request, such as in background threads,
 are correlated too.
+
+### Custom fields
+
+Cloud Logging stores every non-special key of a structured log line in
+`jsonPayload`. There are three ways to add your own keys.
+
+Per call, pass them with `extra`:
+
+```python
+logger.info("charged card", extra={"order_id": order_id, "amount": 12.5})
+```
+
+`extra` keys cannot use the name of a `LogRecord` attribute (`name`,
+`module`, `args`, ...); the logging module raises `KeyError`. Pass those, or
+any dict of fields, under `json_fields` instead, as with
+[google-cloud-logging's `StructuredLogHandler`](https://cloud.google.com/python/docs/reference/logging/latest/std-lib-integration#log-structured-data).
+They are written at the top level, not under a `json_fields` key:
+
+```python
+logger.info("created", extra={"json_fields": {"name": widget.name, "id": widget.id}})
+```
+
+For fields that belong on *every* log entry (the deployed commit, a request
+ID, the calling account, ...), give `GCPFormatter` a `fields` callable. It is
+called once per record, in the thread that logs, so it can read
+`contextvars` and libraries built on them, such as `starlette_context`:
+
+```python
+import logging
+import os
+
+from starlette_context import context
+
+import starlette_gcp_logging
+
+
+def log_fields(record: logging.LogRecord) -> dict:
+    fields = {"commit": os.environ.get("COMMIT_SHA", "")}
+    if context.exists():
+        fields["auditInfo"] = {
+            key: context.data[key]
+            for key in ("login_account_id", "iap_email")
+            if key in context.data
+        }
+    return fields
+
+
+handler = logging.StreamHandler()
+handler.setFormatter(starlette_gcp_logging.GCPFormatter(fields=log_fields))
+logging.basicConfig(handlers=[handler], level=logging.INFO)
+```
+
+Values can be anything JSON-serialisable, including nested dicts; other
+objects are converted with `str()`. The callable may return `None` to add
+nothing. If it raises, the logging module reports the error on stderr and
+drops that record, so keep it simple.
+
+When the same key comes from more than one place, the most specific wins:
+`extra={...}` keys over `json_fields` over the `fields` callable. None of
+them can replace a field the formatter writes itself for that record
+(`severity`, `message`, `time`, `logger`, the trace and source location
+fields, `logging.googleapis.com/labels`, `exception`, ...).
+
+Prefer this over a `logging.Filter` that sets attributes on the record: a
+filter changes the record for every handler, must be added to each handler
+(filters on a logger do not run for records propagated from child loggers),
+and cannot set fields named like `LogRecord` attributes.
+
+Use [`labels`](#custom-labels) instead for short string values you want to
+filter or build log-based metrics on; use `fields` for everything else.
 
 ## Accessing trace context manually
 

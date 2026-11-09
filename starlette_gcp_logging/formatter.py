@@ -115,6 +115,16 @@ class GCPFormatter(logging.Formatter):
         ``False``, ``0``, or ``""``). The ``ContextVar`` values are typically
         set by application code (e.g. in middleware or a dependency) rather
         than by the formatter itself.
+    fields:
+        Optional callable that returns extra top-level JSON fields for a
+        record. It is called once per record, at format time and in the
+        thread that logs, so it can read ``ContextVar`` values or other
+        per-request state (e.g. ``starlette_context``). It may return
+        ``None`` or an empty mapping to add nothing. Fields passed with the
+        log call itself (``extra={...}`` or ``extra={"json_fields": {...}}``)
+        take precedence over these, and none of them can replace a field the
+        formatter writes itself (``severity``, ``message``, the trace
+        fields, ...). The record must not be modified.
     """
 
     def __init__(
@@ -123,10 +133,15 @@ class GCPFormatter(logging.Formatter):
         *,
         labels: collections.abc.Mapping[str, "contextvars.ContextVar[typing.Any]"]
         | None = None,
+        fields: collections.abc.Callable[
+            [logging.LogRecord], collections.abc.Mapping[str, typing.Any] | None
+        ]
+        | None = None,
     ) -> None:
         super().__init__()
         self._project_id = project_id
         self._labels = dict(labels) if labels else {}
+        self._fields = fields
 
     @property
     def project_id(self) -> str:
@@ -206,10 +221,30 @@ class GCPFormatter(logging.Formatter):
         if record.stack_info:
             payload["stackInfo"] = self.formatStack(record.stack_info)
 
-        # -- Extra fields passed via extra={...} ----------------------
+        # -- Extra fields ---------------------------------------------
+        # Lowest to highest precedence: the formatter's ``fields`` callable,
+        # ``extra={"json_fields": {...}}``, then plain ``extra={...}`` keys.
+        # None of them replace a field computed above.
+        extra_fields: dict[str, typing.Any] = {}
+        if self._fields is not None:
+            extra_fields.update(self._fields(record) or {})
+
+        json_fields = record.__dict__.get("json_fields")
+        if isinstance(json_fields, collections.abc.Mapping):
+            # Same convention as google-cloud-logging's StructuredLogHandler.
+            # Unlike ``extra`` keys, these may use names that clash with
+            # LogRecord attributes, e.g. "name" or "module".
+            extra_fields.update(json_fields)
+
         for key, value in record.__dict__.items():
-            if key not in _INTERNAL_ATTRS and not key.startswith("_"):
-                payload[key] = value
+            if key in _INTERNAL_ATTRS or key.startswith("_"):
+                continue
+            if key == "json_fields" and isinstance(value, collections.abc.Mapping):
+                continue
+            extra_fields[key] = value
+
+        for key, value in extra_fields.items():
+            payload.setdefault(key, value)
 
         return json.dumps(payload, default=_json_default)
 

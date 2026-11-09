@@ -602,6 +602,133 @@ class TestGCPFormatterCustomLabels(unittest.TestCase):
         self.assertEqual(labels["tenant_id"], "acme-corp")
 
 
+class TestGCPFormatterFields(unittest.TestCase):
+    def _make_handler(self, fields=None) -> tuple[logging.Logger, io.StringIO]:
+        buf = io.StringIO()
+        handler = logging.StreamHandler(buf)
+        handler.setFormatter(
+            formatter.GCPFormatter(project_id="test-project", fields=fields)
+        )
+        log = logging.getLogger(f"test_fields_{id(buf)}")
+        log.handlers = [handler]
+        log.propagate = False
+        log.setLevel(logging.DEBUG)
+        return log, buf
+
+    def test_fields_from_contextvar(self):
+        request_id: contextvars.ContextVar[str] = contextvars.ContextVar("request_id")
+
+        def fields(record: logging.LogRecord) -> dict:
+            result = {"commit": "abc123"}
+            if (value := request_id.get(None)) is not None:
+                result["request_id"] = value
+            return result
+
+        log, buf = self._make_handler(fields=fields)
+        log.info("outside request")
+        tok = request_id.set("r-1")
+        try:
+            log.info("inside request")
+        finally:
+            request_id.reset(tok)
+
+        outside, inside = [json.loads(line) for line in buf.getvalue().splitlines()]
+        self.assertEqual(outside["commit"], "abc123")
+        self.assertNotIn("request_id", outside)
+        self.assertEqual(inside["commit"], "abc123")
+        self.assertEqual(inside["request_id"], "r-1")
+
+    def test_fields_receives_record(self):
+        log, buf = self._make_handler(
+            fields=lambda record: {"level_name": record.levelname}
+        )
+        log.warning("w")
+        self.assertEqual(json.loads(buf.getvalue())["level_name"], "WARNING")
+
+    def test_fields_may_return_none(self):
+        log, buf = self._make_handler(fields=lambda record: None)
+        log.info("nothing extra")
+        self.assertEqual(json.loads(buf.getvalue())["message"], "nothing extra")
+
+    def test_fields_nested_values(self):
+        log, buf = self._make_handler(
+            fields=lambda record: {"auditInfo": {"method": "GET", "user": "u1"}}
+        )
+        log.info("nested")
+        self.assertEqual(
+            json.loads(buf.getvalue())["auditInfo"], {"method": "GET", "user": "u1"}
+        )
+
+    def test_json_fields_merged_at_top_level(self):
+        log, buf = self._make_handler()
+        # "name" cannot be passed as a plain extra key: it is a LogRecord attribute.
+        log.info("msg", extra={"json_fields": {"name": "widget", "count": 2}})
+        payload = json.loads(buf.getvalue())
+        self.assertEqual(payload["name"], "widget")
+        self.assertEqual(payload["count"], 2)
+        self.assertNotIn("json_fields", payload)
+
+    def test_non_mapping_json_fields_kept_as_field(self):
+        log, buf = self._make_handler()
+        log.info("msg", extra={"json_fields": "not a dict"})
+        self.assertEqual(json.loads(buf.getvalue())["json_fields"], "not a dict")
+
+    def test_precedence(self):
+        log, buf = self._make_handler(
+            fields=lambda record: {"a": "fields", "b": "fields", "c": "fields"}
+        )
+        log.info("msg", extra={"json_fields": {"b": "json_fields", "c": "json"}})
+        log.info("msg", extra={"json_fields": {"c": "json_fields"}, "c": "extra"})
+        first, second = [json.loads(line) for line in buf.getvalue().splitlines()]
+        self.assertEqual(first["a"], "fields")
+        self.assertEqual(first["b"], "json_fields")
+        self.assertEqual(second["c"], "extra")
+
+    def test_formatter_fields_are_not_replaced(self):
+        log, buf = self._make_handler(
+            fields=lambda record: {"severity": "DEBUG", "message": "from fields"}
+        )
+        tok = formatter.request_trace.set("abc123")
+        try:
+            log.error(
+                "real message",
+                extra={
+                    "logger": "spoofed",
+                    "json_fields": {"logging.googleapis.com/trace": "spoofed"},
+                },
+            )
+        finally:
+            formatter.request_trace.reset(tok)
+
+        payload = json.loads(buf.getvalue())
+        self.assertEqual(payload["severity"], "ERROR")
+        self.assertEqual(payload["message"], "real message")
+        self.assertEqual(payload["logger"], log.name)
+        self.assertEqual(
+            payload["logging.googleapis.com/trace"],
+            "projects/test-project/traces/abc123",
+        )
+
+    def test_special_field_passes_through_when_not_computed(self):
+        # With no trace in context, a caller may still supply one.
+        log, buf = self._make_handler()
+        log.info("msg", extra={"logging.googleapis.com/trace": "projects/p/traces/t"})
+        self.assertEqual(
+            json.loads(buf.getvalue())["logging.googleapis.com/trace"],
+            "projects/p/traces/t",
+        )
+
+    def test_record_not_modified(self):
+        log, _ = self._make_handler(fields=lambda record: {"commit": "abc123"})
+        records: list[logging.LogRecord] = []
+        capture = logging.Handler()
+        capture.emit = records.append  # type: ignore[method-assign]
+        log.addHandler(capture)
+        log.info("msg", extra={"json_fields": {"k": "v"}})
+        self.assertFalse(hasattr(records[0], "commit"))
+        self.assertEqual(records[0].json_fields, {"k": "v"})
+
+
 class TestFindRouteTemplate(unittest.TestCase):
     def _make_scope(self, path: str, root_path: str = "") -> dict:
         return {
