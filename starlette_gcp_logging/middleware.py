@@ -140,11 +140,11 @@ def _best(
     """
     partial: str | None = None
     for match, template in candidates:
-        if match == Match.NONE or template is None:
-            continue
         if match == Match.FULL:
+            # Routing stops here, even if this is a Mount with no matching
+            # child (which returns 404) and so has no template.
             return Match.FULL, template
-        if partial is None:
+        if match == Match.PARTIAL and template is not None and partial is None:
             partial = template
     if partial is not None:
         return Match.PARTIAL, partial
@@ -169,7 +169,7 @@ def _match_route(
     # so the container's own match decides. A Host has no path prefix.
     _, sub = _match_router(getattr(route, "app", None), {**scope, **child_scope})
     if sub is None:
-        return Match.NONE, None
+        return match, None
     return match, getattr(route, "path", "") + sub
 
 

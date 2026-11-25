@@ -791,6 +791,20 @@ class TestFindRouteTemplate(unittest.TestCase):
         )
         self.assertEqual(result, "/api/{item_id}")
 
+    def test_mount_without_matching_child_stops_lookup(self):
+        inner = routing.Router(routes=[routing.Route("/other", lambda r: None)])
+        router = routing.Router(
+            routes=[
+                routing.Mount("/api", app=inner),
+                routing.Route("/api/health", lambda r: None),
+            ]
+        )
+        # Starlette routes this request into the mount, which returns 404.
+        result = middleware._find_route_template(
+            router, self._make_scope("/api/health")
+        )
+        self.assertIsNone(result)
+
     def test_host(self):
         inner = routing.Router(
             routes=[routing.Route("/items/{item_id}", lambda r: None)]
@@ -1051,6 +1065,28 @@ class TestFastAPIIncludedRouterRoute(unittest.TestCase):
         self.assertEqual(
             middleware._find_route_template(app.router, scope), "/items/{item_id}"
         )
+
+    def test_included_mount_without_matching_child_stops_lookup(self):
+        app = self.fastapi.FastAPI()
+        router = self.fastapi.APIRouter()
+        inner = routing.Router(routes=[routing.Route("/other", lambda r: None)])
+        router.routes.append(routing.Mount("/api", app=inner))
+        app.include_router(router)
+
+        @app.get("/api/health")
+        def health():
+            return {}
+
+        scope = {
+            "type": "http",
+            "method": "GET",
+            "path": "/api/health",
+            "root_path": "",
+            "path_params": {},
+        }
+        self.assertIsNone(middleware._find_route_template(app.router, scope))
+        response = testclient.TestClient(app).get("/api/health")
+        self.assertEqual(response.status_code, 404)
 
     def test_middleware_labels_included_route(self):
         self.app.add_middleware(
