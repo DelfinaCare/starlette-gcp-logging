@@ -763,6 +763,25 @@ class TestFindRouteTemplate(unittest.TestCase):
         )
         self.assertEqual(result, "/api/user/{user_id}/task/{task_id}")
 
+    def test_full_match_preferred_over_earlier_partial_match(self):
+        router = routing.Router(
+            routes=[
+                routing.Route("/items/{item_id}", lambda r: None, methods=["POST"]),
+                routing.Route("/items/special", lambda r: None, methods=["GET"]),
+            ]
+        )
+        result = middleware._find_route_template(
+            router, self._make_scope("/items/special")
+        )
+        self.assertEqual(result, "/items/special")
+
+    def test_partial_match_used_when_no_full_match(self):
+        router = routing.Router(
+            routes=[routing.Route("/items/{item_id}", lambda r: None, methods=["POST"])]
+        )
+        result = middleware._find_route_template(router, self._make_scope("/items/1"))
+        self.assertEqual(result, "/items/{item_id}")
+
     def test_no_match_returns_none(self):
         router = routing.Router(routes=[routing.Route("/exists", lambda r: None)])
         result = middleware._find_route_template(
@@ -933,6 +952,58 @@ class TestFastAPIIncludedRouterRoute(unittest.TestCase):
 
     def test_no_match_returns_none(self):
         self.assertIsNone(self._template("/api/user/7/missing"))
+
+    def test_full_match_after_included_partial_match(self):
+        app = self.fastapi.FastAPI()
+        items = self.fastapi.APIRouter(prefix="/api")
+
+        @items.post("/{item_id}")
+        def update_item(item_id: str):
+            return {}
+
+        app.include_router(items)
+
+        @app.get("/api/health")
+        def health():
+            return {}
+
+        scope = {
+            "type": "http",
+            "method": "GET",
+            "path": "/api/health",
+            "root_path": "",
+            "path_params": {},
+        }
+        self.assertEqual(
+            middleware._find_route_template(app.router, scope), "/api/health"
+        )
+
+    def test_full_match_across_included_routers(self):
+        app = self.fastapi.FastAPI()
+        first = self.fastapi.APIRouter(prefix="/items")
+        second = self.fastapi.APIRouter(prefix="/items")
+
+        @first.post("/{item_id}")
+        def update_item(item_id: str):
+            return {}
+
+        @second.get("/special")
+        def special():
+            return {}
+
+        app.include_router(first)
+        app.include_router(second)
+
+        scope = {
+            "type": "http",
+            "method": "GET",
+            "path": "/items/special",
+            "root_path": "",
+            "path_params": {},
+        }
+        self.assertEqual(
+            middleware._find_route_template(app.router, scope), "/items/special"
+        )
 
     def test_middleware_labels_included_route(self):
         self.app.add_middleware(

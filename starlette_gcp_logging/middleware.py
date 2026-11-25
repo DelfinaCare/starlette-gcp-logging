@@ -129,54 +129,87 @@ def _extract_trace_context(request: Request) -> tuple[str, str, bool]:
 # ---------------------------------------------------------------------------
 
 
-def _find_included_route_template(
+def _best(
+    candidates: collections.abc.Iterable[tuple[Match, str | None]],
+) -> tuple[Match, str | None]:
+    """Return the first full match, else the first partial one.
+
+    This is how Starlette's router picks a route: a partial match (the path
+    matches but the method doesn't) is only used if no later route matches
+    fully.
+    """
+    partial: str | None = None
+    for match, template in candidates:
+        if match == Match.NONE or template is None:
+            continue
+        if match == Match.FULL:
+            return Match.FULL, template
+        if partial is None:
+            partial = template
+    if partial is not None:
+        return Match.PARTIAL, partial
+    return Match.NONE, None
+
+
+def _match_route(
+    route: typing.Any, scope: collections.abc.Mapping[str, typing.Any]
+) -> tuple[Match, str | None]:
+    """Match a single Starlette route (leaf or Mount) against *scope*."""
+    match, child_scope = route.matches(scope)
+    if match == Match.NONE:
+        return Match.NONE, None
+    if hasattr(route, "endpoint"):
+        # Leaf Route / WebSocketRoute — its path template.
+        return match, route.path
+    if callable(getattr(route, "effective_route_contexts", None)):
+        return _match_included_router(route, scope)
+    # Mount — recurse with the child scope so that get_route_path trims the
+    # mount prefix before inner routes try to match.
+    sub_match, sub = _match_router(
+        getattr(route, "app", None), {**scope, **child_scope}
+    )
+    if sub is None:
+        return Match.NONE, None
+    return sub_match, route.path + sub
+
+
+def _match_included_router(
     included_router: typing.Any, scope: collections.abc.Mapping[str, typing.Any]
-) -> str | None:
-    """Return the full path template of the route in a FastAPI included
-    router that matches *scope*.
+) -> tuple[Match, str | None]:
+    """Match the routes of a FastAPI included router against *scope*.
 
     Since FastAPI 0.137, ``include_router`` adds a single ``_IncludedRouter``
     entry that keeps the original routes, rather than copies of them with the
     prefix applied. Each of its effective route contexts carries the full
-    path, with every ``include_router`` prefix, and matches like the route
-    does once included. A full match (path and method) is preferred over a
-    partial one, as in Starlette's router.
+    path, with every ``include_router`` prefix, and the path regex and
+    methods the route matches with once included. Non-API routes, such as
+    mounts, come with a ``starlette_route`` already rebuilt with the prefix.
     """
     # get_route_path only reads the scope, though it's typed as mutable.
     route_path = get_route_path(typing.cast(dict[str, typing.Any], scope))
-    partial: str | None = None
-    for context in included_router.effective_route_contexts():
-        starlette_route = getattr(context, "starlette_route", None)
-        if starlette_route is not None:
-            # A Mount or other non-API route, already rebuilt with the prefix.
-            match, child_scope = starlette_route.matches(scope)
-            if match == Match.NONE:
+
+    def candidates() -> collections.abc.Iterator[tuple[Match, str | None]]:
+        for context in included_router.effective_route_contexts():
+            starlette_route = getattr(context, "starlette_route", None)
+            if starlette_route is not None:
+                yield _match_route(starlette_route, scope)
                 continue
-            if hasattr(starlette_route, "endpoint"):
-                template: str | None = starlette_route.path
-            else:
-                sub = _find_route_template(
-                    getattr(starlette_route, "app", None), {**scope, **child_scope}
-                )
-                template = None if sub is None else starlette_route.path + sub
-        else:
             path_regex = getattr(context, "path_regex", None)
             if path_regex is None or not path_regex.match(route_path):
                 continue
             methods = getattr(context, "methods", None)
-            match = (
-                Match.FULL
-                if not methods or scope.get("method") in methods
-                else Match.PARTIAL
-            )
-            template = context.path
-        if template is None:
-            continue
-        if match == Match.FULL:
-            return template
-        if partial is None:
-            partial = template
-    return partial
+            if not methods or scope.get("method") in methods:
+                yield Match.FULL, context.path
+            else:
+                yield Match.PARTIAL, context.path
+
+    return _best(candidates())
+
+
+def _match_router(
+    router: typing.Any, scope: collections.abc.Mapping[str, typing.Any]
+) -> tuple[Match, str | None]:
+    return _best(_match_route(route, scope) for route in getattr(router, "routes", []))
 
 
 def _find_route_template(
@@ -185,7 +218,9 @@ def _find_route_template(
     """Recursively search *router*'s route table for the path template that
     matches *scope*, e.g. ``'/api/user/{user_id}/task/{task_id}'``.
 
-    Returns ``None`` when no route matches (e.g. a 404 request).
+    Returns ``None`` when no route matches (e.g. a 404 request). As in
+    Starlette's router, a route that matches the path but not the method is
+    only used when no other route matches both.
 
     ``route.matches()`` is a pure query — it does not mutate *scope* — so
     calling it before the actual routing happens in ``call_next`` is safe.
@@ -193,28 +228,9 @@ def _find_route_template(
     carries an updated ``root_path`` that trims the mount prefix; we merge
     this into a copy of *scope* before recursing so that inner routes see
     only their own path segment. Routers added with FastAPI's
-    ``include_router`` are searched with :func:`_find_included_route_template`.
+    ``include_router`` are searched through their effective route contexts.
     """
-    for route in getattr(router, "routes", []):
-        match, child_scope = route.matches(scope)
-        if match == Match.NONE:
-            continue
-        if hasattr(route, "endpoint"):
-            # Leaf Route / WebSocketRoute — return its path template.
-            return route.path
-        if callable(getattr(route, "effective_route_contexts", None)):
-            sub = _find_included_route_template(route, scope)
-            if sub is not None:
-                return sub
-            continue
-        # Mount — recurse with the child scope so that get_route_path trims
-        # the mount prefix before inner routes try to match.
-        sub = _find_route_template(
-            getattr(route, "app", None), {**scope, **child_scope}
-        )
-        if sub is not None:
-            return route.path + sub
-    return None
+    return _match_router(router, scope)[1]
 
 
 def _extract_route_path(request: Request) -> str:
