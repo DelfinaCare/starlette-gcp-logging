@@ -258,7 +258,8 @@ The middleware writes the route template to:
 - `labels."starlette.dev/route"`
 
 Use that field as a log-based metric label so alerts are grouped per route
-template (for example, `"/items/{item_id}"`). On Cloud Run, Cloud Run's own
+template (for example, `"/items/{item_id}"`). The template includes the
+prefixes of any `Mount` and of FastAPI's `include_router`. On Cloud Run, Cloud Run's own
 request logs (`run.googleapis.com/requests`) also carry `httpRequest`, so
 restrict the filters to the middleware's entries with
 `jsonPayload.logger="starlette_gcp_logging.middleware"`.

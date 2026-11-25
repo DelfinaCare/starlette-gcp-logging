@@ -21,6 +21,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response
 from starlette.routing import Match
+from starlette.routing import get_route_path
 from starlette.types import ASGIApp
 
 from . import _metadata
@@ -128,6 +129,56 @@ def _extract_trace_context(request: Request) -> tuple[str, str, bool]:
 # ---------------------------------------------------------------------------
 
 
+def _find_included_route_template(
+    included_router: typing.Any, scope: collections.abc.Mapping[str, typing.Any]
+) -> str | None:
+    """Return the full path template of the route in a FastAPI included
+    router that matches *scope*.
+
+    Since FastAPI 0.137, ``include_router`` adds a single ``_IncludedRouter``
+    entry that keeps the original routes, rather than copies of them with the
+    prefix applied. Each of its effective route contexts carries the full
+    path, with every ``include_router`` prefix, and matches like the route
+    does once included. A full match (path and method) is preferred over a
+    partial one, as in Starlette's router.
+    """
+    # get_route_path only reads the scope, though it's typed as mutable.
+    route_path = get_route_path(typing.cast(dict[str, typing.Any], scope))
+    partial: str | None = None
+    for context in included_router.effective_route_contexts():
+        starlette_route = getattr(context, "starlette_route", None)
+        if starlette_route is not None:
+            # A Mount or other non-API route, already rebuilt with the prefix.
+            match, child_scope = starlette_route.matches(scope)
+            if match == Match.NONE:
+                continue
+            if hasattr(starlette_route, "endpoint"):
+                template: str | None = starlette_route.path
+            else:
+                sub = _find_route_template(
+                    getattr(starlette_route, "app", None), {**scope, **child_scope}
+                )
+                template = None if sub is None else starlette_route.path + sub
+        else:
+            path_regex = getattr(context, "path_regex", None)
+            if path_regex is None or not path_regex.match(route_path):
+                continue
+            methods = getattr(context, "methods", None)
+            match = (
+                Match.FULL
+                if not methods or scope.get("method") in methods
+                else Match.PARTIAL
+            )
+            template = context.path
+        if template is None:
+            continue
+        if match == Match.FULL:
+            return template
+        if partial is None:
+            partial = template
+    return partial
+
+
 def _find_route_template(
     router: typing.Any, scope: collections.abc.Mapping[str, typing.Any]
 ) -> str | None:
@@ -141,7 +192,8 @@ def _find_route_template(
     When a :class:`starlette.routing.Mount` matches, its ``child_scope``
     carries an updated ``root_path`` that trims the mount prefix; we merge
     this into a copy of *scope* before recursing so that inner routes see
-    only their own path segment.
+    only their own path segment. Routers added with FastAPI's
+    ``include_router`` are searched with :func:`_find_included_route_template`.
     """
     for route in getattr(router, "routes", []):
         match, child_scope = route.matches(scope)
@@ -150,6 +202,11 @@ def _find_route_template(
         if hasattr(route, "endpoint"):
             # Leaf Route / WebSocketRoute — return its path template.
             return route.path
+        if callable(getattr(route, "effective_route_contexts", None)):
+            sub = _find_included_route_template(route, scope)
+            if sub is not None:
+                return sub
+            continue
         # Mount — recurse with the child scope so that get_route_path trims
         # the mount prefix before inner routes try to match.
         sub = _find_route_template(

@@ -869,6 +869,102 @@ class TestMiddlewareRoutePropagation(unittest.TestCase):
             )
 
 
+class TestFastAPIIncludedRouterRoute(unittest.TestCase):
+    """FastAPI >= 0.137 keeps included routes behind an ``_IncludedRouter``."""
+
+    def setUp(self):
+        import fastapi
+
+        self.fastapi = fastapi
+        self.app = fastapi.FastAPI()
+        tasks = fastapi.APIRouter(prefix="/tasks")
+
+        @tasks.get("/{task_id}")
+        def get_task(task_id: str):
+            logging.getLogger("app").info("inside handler")
+            return {}
+
+        @tasks.post("/{task_id}/done")
+        def finish_task(task_id: str):
+            return {}
+
+        users = fastapi.APIRouter(prefix="/user/{user_id}")
+        users.include_router(tasks)
+
+        @users.get("/profile")
+        def get_profile(user_id: str):
+            return {}
+
+        self.app.include_router(users, prefix="/api")
+
+        @self.app.get("/health")
+        def health():
+            return {}
+
+    def _template(self, path: str, method: str = "GET") -> str | None:
+        scope = {
+            "type": "http",
+            "method": method,
+            "path": path,
+            "root_path": "",
+            "path_params": {},
+        }
+        return middleware._find_route_template(self.app.router, scope)
+
+    def test_included_router_with_prefix(self):
+        self.assertEqual(
+            self._template("/api/user/7/profile"), "/api/user/{user_id}/profile"
+        )
+
+    def test_nested_included_routers(self):
+        self.assertEqual(
+            self._template("/api/user/7/tasks/abc"),
+            "/api/user/{user_id}/tasks/{task_id}",
+        )
+
+    def test_method_mismatch_still_returns_template(self):
+        self.assertEqual(
+            self._template("/api/user/7/tasks/abc/done", method="GET"),
+            "/api/user/{user_id}/tasks/{task_id}/done",
+        )
+
+    def test_route_on_app_itself(self):
+        self.assertEqual(self._template("/health"), "/health")
+
+    def test_no_match_returns_none(self):
+        self.assertIsNone(self._template("/api/user/7/missing"))
+
+    def test_middleware_labels_included_route(self):
+        self.app.add_middleware(
+            middleware.GCPRequestLoggingMiddleware, project_id="my-project"
+        )
+        buf = io.StringIO()
+        handler = logging.StreamHandler(buf)
+        handler.setFormatter(formatter.GCPFormatter(project_id="my-project"))
+        root = logging.getLogger()
+        root.addHandler(handler)
+        root.setLevel(logging.DEBUG)
+        try:
+            testclient.TestClient(self.app).get("/api/user/7/tasks/abc")
+        finally:
+            root.removeHandler(handler)
+
+        entries = [
+            json.loads(line)
+            for line in buf.getvalue().splitlines()
+            if line.strip()
+            and json.loads(line)
+            .get("logger", "")
+            .startswith(("app", "starlette_gcp_logging"))
+        ]
+        self.assertEqual(len(entries), 2)
+        for entry in entries:
+            self.assertEqual(
+                entry["logging.googleapis.com/labels"]["starlette.dev/route"],
+                "/api/user/{user_id}/tasks/{task_id}",
+            )
+
+
 class TestOpenTelemetryCorrelation(unittest.TestCase):
     def setUp(self):
         from opentelemetry.sdk import trace as sdk_trace
