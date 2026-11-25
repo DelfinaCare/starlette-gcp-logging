@@ -763,6 +763,65 @@ class TestFindRouteTemplate(unittest.TestCase):
         )
         self.assertEqual(result, "/api/user/{user_id}/task/{task_id}")
 
+    def test_full_match_preferred_over_earlier_partial_match(self):
+        router = routing.Router(
+            routes=[
+                routing.Route("/items/{item_id}", lambda r: None, methods=["POST"]),
+                routing.Route("/items/special", lambda r: None, methods=["GET"]),
+            ]
+        )
+        result = middleware._find_route_template(
+            router, self._make_scope("/items/special")
+        )
+        self.assertEqual(result, "/items/special")
+
+    def test_mount_match_wins_over_later_route(self):
+        inner = routing.Router(
+            routes=[routing.Route("/{item_id}", lambda r: None, methods=["POST"])]
+        )
+        router = routing.Router(
+            routes=[
+                routing.Mount("/api", app=inner),
+                routing.Route("/api/health", lambda r: None, methods=["GET"]),
+            ]
+        )
+        # Starlette routes this request into the mount (and returns 405).
+        result = middleware._find_route_template(
+            router, self._make_scope("/api/health")
+        )
+        self.assertEqual(result, "/api/{item_id}")
+
+    def test_mount_without_matching_child_stops_lookup(self):
+        inner = routing.Router(routes=[routing.Route("/other", lambda r: None)])
+        router = routing.Router(
+            routes=[
+                routing.Mount("/api", app=inner),
+                routing.Route("/api/health", lambda r: None),
+            ]
+        )
+        # Starlette routes this request into the mount, which returns 404.
+        result = middleware._find_route_template(
+            router, self._make_scope("/api/health")
+        )
+        self.assertIsNone(result)
+
+    def test_host(self):
+        inner = routing.Router(
+            routes=[routing.Route("/items/{item_id}", lambda r: None)]
+        )
+        router = routing.Router(routes=[routing.Host("api.example.com", app=inner)])
+        scope = self._make_scope("/items/1")
+        scope["headers"] = [(b"host", b"api.example.com")]
+        result = middleware._find_route_template(router, scope)
+        self.assertEqual(result, "/items/{item_id}")
+
+    def test_partial_match_used_when_no_full_match(self):
+        router = routing.Router(
+            routes=[routing.Route("/items/{item_id}", lambda r: None, methods=["POST"])]
+        )
+        result = middleware._find_route_template(router, self._make_scope("/items/1"))
+        self.assertEqual(result, "/items/{item_id}")
+
     def test_no_match_returns_none(self):
         router = routing.Router(routes=[routing.Route("/exists", lambda r: None)])
         result = middleware._find_route_template(
@@ -866,6 +925,223 @@ class TestMiddlewareRoutePropagation(unittest.TestCase):
             self.assertNotIn(
                 "starlette.dev/route",
                 entry.get("logging.googleapis.com/labels", {}),
+            )
+
+
+class TestFastAPIIncludedRouterRoute(unittest.TestCase):
+    """FastAPI >= 0.137 keeps included routes behind an ``_IncludedRouter``."""
+
+    def setUp(self):
+        import fastapi
+
+        self.fastapi = fastapi
+        self.app = fastapi.FastAPI()
+        tasks = fastapi.APIRouter(prefix="/tasks")
+
+        @tasks.get("/{task_id}")
+        def get_task(task_id: str):
+            logging.getLogger("app").info("inside handler")
+            return {}
+
+        @tasks.post("/{task_id}/done")
+        def finish_task(task_id: str):
+            return {}
+
+        users = fastapi.APIRouter(prefix="/user/{user_id}")
+        users.include_router(tasks)
+
+        @users.get("/profile")
+        def get_profile(user_id: str):
+            return {}
+
+        self.app.include_router(users, prefix="/api")
+
+        @self.app.get("/health")
+        def health():
+            return {}
+
+    def _template(self, path: str, method: str = "GET") -> str | None:
+        scope = {
+            "type": "http",
+            "method": method,
+            "path": path,
+            "root_path": "",
+            "path_params": {},
+        }
+        return middleware._find_route_template(self.app.router, scope)
+
+    def test_included_router_with_prefix(self):
+        self.assertEqual(
+            self._template("/api/user/7/profile"), "/api/user/{user_id}/profile"
+        )
+
+    def test_nested_included_routers(self):
+        self.assertEqual(
+            self._template("/api/user/7/tasks/abc"),
+            "/api/user/{user_id}/tasks/{task_id}",
+        )
+
+    def test_method_mismatch_still_returns_template(self):
+        self.assertEqual(
+            self._template("/api/user/7/tasks/abc/done", method="GET"),
+            "/api/user/{user_id}/tasks/{task_id}/done",
+        )
+
+    def test_route_on_app_itself(self):
+        self.assertEqual(self._template("/health"), "/health")
+
+    def test_no_match_returns_none(self):
+        self.assertIsNone(self._template("/api/user/7/missing"))
+
+    def test_full_match_after_included_partial_match(self):
+        app = self.fastapi.FastAPI()
+        items = self.fastapi.APIRouter(prefix="/api")
+
+        @items.post("/{item_id}")
+        def update_item(item_id: str):
+            return {}
+
+        app.include_router(items)
+
+        @app.get("/api/health")
+        def health():
+            return {}
+
+        scope = {
+            "type": "http",
+            "method": "GET",
+            "path": "/api/health",
+            "root_path": "",
+            "path_params": {},
+        }
+        self.assertEqual(
+            middleware._find_route_template(app.router, scope), "/api/health"
+        )
+
+    def test_full_match_across_included_routers(self):
+        app = self.fastapi.FastAPI()
+        first = self.fastapi.APIRouter(prefix="/items")
+        second = self.fastapi.APIRouter(prefix="/items")
+
+        @first.post("/{item_id}")
+        def update_item(item_id: str):
+            return {}
+
+        @second.get("/special")
+        def special():
+            return {}
+
+        app.include_router(first)
+        app.include_router(second)
+
+        scope = {
+            "type": "http",
+            "method": "GET",
+            "path": "/items/special",
+            "root_path": "",
+            "path_params": {},
+        }
+        self.assertEqual(
+            middleware._find_route_template(app.router, scope), "/items/special"
+        )
+
+    def test_included_host(self):
+        app = self.fastapi.FastAPI()
+        router = self.fastapi.APIRouter(prefix="/api")
+        inner = routing.Router(
+            routes=[routing.Route("/items/{item_id}", lambda r: None)]
+        )
+        router.routes.append(routing.Host("api.example.com", app=inner))
+        app.include_router(router)
+
+        scope = {
+            "type": "http",
+            "method": "GET",
+            "path": "/items/1",
+            "root_path": "",
+            "path_params": {},
+            "headers": [(b"host", b"api.example.com")],
+        }
+        self.assertEqual(
+            middleware._find_route_template(app.router, scope), "/items/{item_id}"
+        )
+
+    def test_included_mount_with_path_params(self):
+        async def get_object(request):
+            return responses.PlainTextResponse("ok")
+
+        app = self.fastapi.FastAPI()
+        router = self.fastapi.APIRouter()
+        router.mount(
+            "/files/{bucket}",
+            routing.Router(routes=[routing.Route("/objects/{name}", get_object)]),
+        )
+        app.include_router(router, prefix="/v1")
+
+        scope = {
+            "type": "http",
+            "method": "GET",
+            "path": "/v1/files/b1/objects/x",
+            "root_path": "",
+            "path_params": {},
+        }
+        self.assertEqual(
+            middleware._find_route_template(app.router, scope),
+            "/v1/files/{bucket}/objects/{name}",
+        )
+        response = testclient.TestClient(app).get("/v1/files/b1/objects/x")
+        self.assertEqual(response.status_code, 200)
+
+    def test_included_mount_without_matching_child_stops_lookup(self):
+        app = self.fastapi.FastAPI()
+        router = self.fastapi.APIRouter()
+        inner = routing.Router(routes=[routing.Route("/other", lambda r: None)])
+        router.routes.append(routing.Mount("/api", app=inner))
+        app.include_router(router)
+
+        @app.get("/api/health")
+        def health():
+            return {}
+
+        scope = {
+            "type": "http",
+            "method": "GET",
+            "path": "/api/health",
+            "root_path": "",
+            "path_params": {},
+        }
+        self.assertIsNone(middleware._find_route_template(app.router, scope))
+        response = testclient.TestClient(app).get("/api/health")
+        self.assertEqual(response.status_code, 404)
+
+    def test_middleware_labels_included_route(self):
+        self.app.add_middleware(
+            middleware.GCPRequestLoggingMiddleware, project_id="my-project"
+        )
+        buf = io.StringIO()
+        handler = logging.StreamHandler(buf)
+        handler.setFormatter(formatter.GCPFormatter(project_id="my-project"))
+        root = logging.getLogger()
+        root.addHandler(handler)
+        root.setLevel(logging.DEBUG)
+        try:
+            testclient.TestClient(self.app).get("/api/user/7/tasks/abc")
+        finally:
+            root.removeHandler(handler)
+
+        entries = [
+            json.loads(line)
+            for line in buf.getvalue().splitlines()
+            if line.strip()
+            and json.loads(line)
+            .get("logger", "")
+            .startswith(("app", "starlette_gcp_logging"))
+        ]
+        self.assertEqual(len(entries), 2)
+        for entry in entries:
+            self.assertEqual(
+                entry["logging.googleapis.com/labels"]["starlette.dev/route"],
+                "/api/user/{user_id}/tasks/{task_id}",
             )
 
 
