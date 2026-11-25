@@ -163,14 +163,14 @@ def _match_route(
         return match, route.path
     if callable(getattr(route, "effective_route_contexts", None)):
         return _match_included_router(route, scope)
-    # Mount — recurse with the child scope so that get_route_path trims the
-    # mount prefix before inner routes try to match.
-    sub_match, sub = _match_router(
-        getattr(route, "app", None), {**scope, **child_scope}
-    )
+    # Mount or Host — recurse with the child scope so that get_route_path
+    # trims the mount prefix before inner routes try to match. Routing enters
+    # a matching Mount even if no inner route matches fully (and returns 405),
+    # so the container's own match decides. A Host has no path prefix.
+    _, sub = _match_router(getattr(route, "app", None), {**scope, **child_scope})
     if sub is None:
         return Match.NONE, None
-    return sub_match, route.path + sub
+    return match, getattr(route, "path", "") + sub
 
 
 def _match_included_router(

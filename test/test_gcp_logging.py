@@ -775,6 +775,32 @@ class TestFindRouteTemplate(unittest.TestCase):
         )
         self.assertEqual(result, "/items/special")
 
+    def test_mount_match_wins_over_later_route(self):
+        inner = routing.Router(
+            routes=[routing.Route("/{item_id}", lambda r: None, methods=["POST"])]
+        )
+        router = routing.Router(
+            routes=[
+                routing.Mount("/api", app=inner),
+                routing.Route("/api/health", lambda r: None, methods=["GET"]),
+            ]
+        )
+        # Starlette routes this request into the mount (and returns 405).
+        result = middleware._find_route_template(
+            router, self._make_scope("/api/health")
+        )
+        self.assertEqual(result, "/api/{item_id}")
+
+    def test_host(self):
+        inner = routing.Router(
+            routes=[routing.Route("/items/{item_id}", lambda r: None)]
+        )
+        router = routing.Router(routes=[routing.Host("api.example.com", app=inner)])
+        scope = self._make_scope("/items/1")
+        scope["headers"] = [(b"host", b"api.example.com")]
+        result = middleware._find_route_template(router, scope)
+        self.assertEqual(result, "/items/{item_id}")
+
     def test_partial_match_used_when_no_full_match(self):
         router = routing.Router(
             routes=[routing.Route("/items/{item_id}", lambda r: None, methods=["POST"])]
@@ -1003,6 +1029,27 @@ class TestFastAPIIncludedRouterRoute(unittest.TestCase):
         }
         self.assertEqual(
             middleware._find_route_template(app.router, scope), "/items/special"
+        )
+
+    def test_included_host(self):
+        app = self.fastapi.FastAPI()
+        router = self.fastapi.APIRouter(prefix="/api")
+        inner = routing.Router(
+            routes=[routing.Route("/items/{item_id}", lambda r: None)]
+        )
+        router.routes.append(routing.Host("api.example.com", app=inner))
+        app.include_router(router)
+
+        scope = {
+            "type": "http",
+            "method": "GET",
+            "path": "/items/1",
+            "root_path": "",
+            "path_params": {},
+            "headers": [(b"host", b"api.example.com")],
+        }
+        self.assertEqual(
+            middleware._find_route_template(app.router, scope), "/items/{item_id}"
         )
 
     def test_middleware_labels_included_route(self):
