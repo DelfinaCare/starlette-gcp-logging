@@ -1066,6 +1066,32 @@ class TestFastAPIIncludedRouterRoute(unittest.TestCase):
             middleware._find_route_template(app.router, scope), "/items/{item_id}"
         )
 
+    def test_included_mount_with_path_params(self):
+        async def get_object(request):
+            return responses.PlainTextResponse("ok")
+
+        app = self.fastapi.FastAPI()
+        router = self.fastapi.APIRouter()
+        router.mount(
+            "/files/{bucket}",
+            routing.Router(routes=[routing.Route("/objects/{name}", get_object)]),
+        )
+        app.include_router(router, prefix="/v1")
+
+        scope = {
+            "type": "http",
+            "method": "GET",
+            "path": "/v1/files/b1/objects/x",
+            "root_path": "",
+            "path_params": {},
+        }
+        self.assertEqual(
+            middleware._find_route_template(app.router, scope),
+            "/v1/files/{bucket}/objects/{name}",
+        )
+        response = testclient.TestClient(app).get("/v1/files/b1/objects/x")
+        self.assertEqual(response.status_code, 200)
+
     def test_included_mount_without_matching_child_stops_lookup(self):
         app = self.fastapi.FastAPI()
         router = self.fastapi.APIRouter()
